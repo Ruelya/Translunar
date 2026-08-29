@@ -6,7 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { createRef } from "react";
+import { createRef, useLayoutEffect } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { Segment } from "@translunar/contracts";
@@ -33,6 +33,23 @@ function segment(
     contextHash: "context",
     updatedAtMs: 1,
   };
+}
+
+/**
+ * Records the target editor's value once per React commit, from a layout
+ * effect — i.e. before the browser would paint that commit. Any value
+ * captured here is a value the user could see flash on screen.
+ */
+function EditorPaintProbe({ log }: { log: string[] }) {
+  useLayoutEffect(() => {
+    const editor = document.querySelector<HTMLTextAreaElement>(
+      ".segment-grid__target-editor textarea",
+    );
+    if (editor) {
+      log.push(editor.value);
+    }
+  });
+  return null;
 }
 
 describe("SegmentGrid", () => {
@@ -75,6 +92,40 @@ describe("SegmentGrid", () => {
     ];
     expect(confirmedSegment.id).toBe("s1");
     expect(draft).toBe("你好。");
+  });
+
+  it("never paints the previous segment's text when the selection moves (flash regression)", () => {
+    // Bug report: segment 48 holds "240"; clicking the empty segment 66
+    // flashed "240" inside 66's editor for one frame before it cleared.
+    const paints: string[] = [];
+    const rows = [segment("s48", 47, "测温", "240"), segment("s66", 65, "色板")];
+    const shared = {
+      segments: rows,
+      qaSegmentIds: new Set<string>(),
+      onSelect: vi.fn(),
+      onSaveDraft: vi.fn(),
+      onConfirm: vi.fn(),
+    };
+    const { rerender } = render(
+      <>
+        <SegmentGrid {...shared} activeSegmentId="s48" />
+        <EditorPaintProbe log={paints} />
+      </>,
+    );
+    expect(paints.at(-1)).toBe("240");
+    const before = paints.length;
+    rerender(
+      <>
+        <SegmentGrid {...shared} activeSegmentId="s66" />
+        <EditorPaintProbe log={paints} />
+      </>,
+    );
+    const afterSwitch = paints.slice(before);
+    // Every value committed after the switch belongs to segment 66: the
+    // editor must never hold "240" at any paintable moment.
+    expect(afterSwitch.length).toBeGreaterThan(0);
+    expect(afterSwitch).not.toContain("240");
+    expect(afterSwitch.at(-1)).toBe("");
   });
 
   it("renders no per-row save/confirm buttons in the active row", () => {

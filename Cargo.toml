@@ -18,6 +18,7 @@ members = [
   "crates/tl-ai",
   "crates/tl-protocol",
   "crates/tl-engine",
+  "crates/tl-cli",
 ]
 
 [workspace.package]

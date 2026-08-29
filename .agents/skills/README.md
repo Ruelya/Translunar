@@ -6,6 +6,7 @@ Portable agent skills available to any assistant working in this repository.
 | --- | --- |
 | `design-taste-frontend` | Anti-slop frontend taste rules (layout, typography, motion, copy discipline). |
 | `ui-ux-pro-max` | Searchable UI/UX rule database (styles, palettes, typography, UX guidelines, stack rules). |
+| `translunar-cli` | Drive the Translunar engine from external agents through the `tl-cli` JSON-RPC bridge (projects, segments, TM/terms, QA, export, AI harness). |
 
 ---
 

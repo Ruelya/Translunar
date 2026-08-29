@@ -17,7 +17,10 @@
 
 import type { BrowserWindowConstructorOptions } from "electron";
 
-import type { TitlebarOverlayColors, WindowChromeMode } from "../shared/desktop-api.js";
+import type {
+  TitlebarOverlayColors,
+  WindowChromeMode,
+} from "../shared/desktop-api.js";
 
 /** One height for the CSS strip (`--tl-titlebar-h`) and the native overlay. */
 export const TITLEBAR_HEIGHT = 32;

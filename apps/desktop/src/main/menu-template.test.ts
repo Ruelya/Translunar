@@ -187,6 +187,7 @@ const COMMAND_ITEMS: Array<{
   { label: "归档项目", command: "archive-project", needs: "project" },
   { label: "复制源文到译文", command: "copy-source", needs: "document" },
   { label: "清空译文", command: "clear-target", needs: "document" },
+  { label: "编辑源文", command: "edit-source", needs: "document" },
   { label: "预翻译（TM）", command: "pretranslate", needs: "document" },
   { label: "插入记忆匹配", command: "insert-tm", needs: "document" },
   { label: "插入术语", command: "insert-term", needs: "document" },
@@ -448,9 +449,7 @@ describe("menuBarSubmenu (integrated titlebar popups)", () => {
       onCommand,
     };
     const submenu = menuBarSubmenu(options, "file");
-    expect(
-      submenu?.some((entry) => entry.label === "新建项目…"),
-    ).toBe(true);
+    expect(submenu?.some((entry) => entry.label === "新建项目…")).toBe(true);
   });
 
   it("returns null for an unknown menu id", () => {

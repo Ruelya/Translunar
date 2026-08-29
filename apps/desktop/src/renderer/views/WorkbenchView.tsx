@@ -85,6 +85,7 @@ import { SegmentGrid } from "../components/SegmentGrid.js";
 import type {
   ConfirmMode,
   EditorCaret,
+  EditorSuggestion,
   SegmentGridHandle,
 } from "../components/SegmentGrid.js";
 import { TmPanel } from "../components/TmPanel.js";
@@ -487,6 +488,45 @@ export function WorkbenchView({
       cancelled = true;
     };
   }, [project.id, activeSegment]);
+
+  // AutoSuggest data source, called by the target editor on the first
+  // keystroke of an editing session — never on mere selection, so browsing
+  // and locked rows cost no lookups. Composition only: the engine scored
+  // the TM matches and found the term spans; numbers are lifted verbatim
+  // from the source. A failed term lookup just means no term candidates.
+  const tmMatchesRef = useRef<TmMatchItem[]>([]);
+  tmMatchesRef.current = tmMatches;
+  const requestEditorSuggestions = useCallback(
+    async (segment: Segment): Promise<EditorSuggestion[]> => {
+      const candidates: EditorSuggestion[] = [];
+      for (const match of tmMatchesRef.current) {
+        candidates.push({ text: match.entry.targetText, kind: "tm" });
+      }
+      try {
+        const result = await callEngine("term.lookup", {
+          projectId: project.id,
+          sourceText: segment.sourceText,
+        });
+        for (const match of result.matches) {
+          for (const translation of match.translations) {
+            if (
+              translation.locale === project.targetLocale &&
+              !translation.forbidden
+            ) {
+              candidates.push({ text: translation.term, kind: "term" });
+            }
+          }
+        }
+      } catch {
+        // No term candidates — the popup shows the sources it has.
+      }
+      for (const token of segment.sourceText.matchAll(/\d+(?:[.,:]\d+)*%?/g)) {
+        candidates.push({ text: token[0], kind: "number" });
+      }
+      return candidates;
+    },
+    [project.id, project.targetLocale],
+  );
 
   // The stored QA export gate, fetched once per project. A failed fetch
   // leaves the menu checkbox off — the toggle refetches before writing, so
@@ -1229,6 +1269,35 @@ export function WorkbenchView({
       });
     },
     [activeSegment, saveDraft],
+  );
+
+  // 编辑源文 (double-click on the source cell, row menu, context menu):
+  // segment.updateSource with the same optimistic-concurrency shape as
+  // target writes. The engine owns every guard — stale revision, locked
+  // row, empty source, and the honest confirmed→draft demotion when the
+  // confirmation covered the old source.
+  const updateSourceText = useCallback(
+    (segment: Segment, sourceText: string): Promise<void> =>
+      enqueueSegmentWrite(async () => {
+        const latest = latestSegmentsRef.current.get(segment.id) ?? segment;
+        try {
+          const result = await callEngine("segment.updateSource", {
+            segmentId: segment.id,
+            sourceText,
+            baseRevision: latest.revision,
+          });
+          applySegments([result.segment]);
+          onStatusMessage(
+            result.segment.state === "draft" && latest.state === "confirmed"
+              ? `句段 #${segment.ordinal + 1} 源文已更新，确认状态回到草稿`
+              : `句段 #${segment.ordinal + 1} 源文已更新`,
+          );
+        } catch (error) {
+          onStatusMessage(`源文更新失败：${describeError(error)}`);
+          await reloadSegments();
+        }
+      }),
+    [enqueueSegmentWrite, applySegments, onStatusMessage, reloadSegments],
   );
 
   // Row menu 复制源文: the source text becomes the draft via the same
@@ -2400,6 +2469,11 @@ export function WorkbenchView({
           }
           break;
         }
+        case "edit-source":
+          if (!gridRef.current?.editActiveSource()) {
+            onStatusMessage("当前句段无法编辑源文（未选中或已锁定）");
+          }
+          break;
         case "clear-target": {
           const segment = editableActive();
           if (segment) {
@@ -3329,7 +3403,29 @@ export function WorkbenchView({
                   onCopySource={copySourceToTarget}
                   onClearTarget={clearTargetText}
                   onToggleLock={(segment) => void toggleLockSegment(segment)}
+                  onUpdateSource={(segment, text) =>
+                    void updateSourceText(segment, text)
+                  }
+                  onContextMenuRequest={(segment, position) => {
+                    // Hosts without the desktop bridge (unit tests) fall
+                    // back to the grid's DOM menu.
+                    if (typeof window.tl?.popupSegmentMenu !== "function") {
+                      return false;
+                    }
+                    void window.tl.popupSegmentMenu(
+                      {
+                        ordinal: segment.ordinal,
+                        locked: segment.locked === true,
+                        hasTarget: segment.targetText.length > 0,
+                        sourceEditable: true,
+                      },
+                      position.x,
+                      position.y,
+                    );
+                    return true;
+                  }}
                   onCaretChange={setCaret}
+                  onRequestSuggestions={requestEditorSuggestions}
                 />
               )}
               <PreviewPane

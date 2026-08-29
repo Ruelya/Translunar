@@ -7,7 +7,11 @@ import {
   useRef,
   useState,
 } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent, Ref } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  Ref,
+  RefObject,
+} from "react";
 
 import { IconDots, IconLock, IconLockOpen } from "@tabler/icons-react";
 
@@ -43,6 +47,74 @@ export interface EditorCaret {
   column: number;
 }
 
+/**
+ * One AutoSuggest candidate for the active segment's target editor. The
+ * grid only prefix-filters and displays — every candidate comes from data
+ * the engine already returned (TM matches, term hits) or verbatim source
+ * material (numbers); nothing is scored or invented here.
+ */
+export interface EditorSuggestion {
+  text: string;
+  kind: "tm" | "term" | "number";
+}
+
+const SUGGESTION_KIND_LABEL: Record<EditorSuggestion["kind"], string> = {
+  tm: "TM",
+  term: "术语",
+  number: "数字",
+};
+
+/** Cap the popup so it stays a glance, not a second document. */
+const SUGGESTION_LIMIT = 8;
+
+/**
+ * The word prefix immediately before the caret: the run of letters,
+ * digits, marks and number-punctuation the user is mid-typing. Returns
+ * null when the caret sits on a boundary (nothing typed yet).
+ */
+function suggestPrefixAt(
+  value: string,
+  caret: number,
+): { start: number; text: string } | null {
+  const before = value.slice(0, caret);
+  let start = before.length;
+  for (const match of before.matchAll(
+    /[\p{L}\p{N}\p{M}][\p{L}\p{N}\p{M}.,:%-]*$/gu,
+  )) {
+    start = match.index;
+    break;
+  }
+  if (start >= before.length) {
+    return null;
+  }
+  return { start, text: before.slice(start) };
+}
+
+/** Case-insensitive prefix filter over the provided candidates. */
+function filterSuggestions(
+  candidates: readonly EditorSuggestion[],
+  prefix: string,
+): EditorSuggestion[] {
+  const lowered = prefix.toLowerCase();
+  const seen = new Set<string>();
+  const matches: EditorSuggestion[] = [];
+  for (const candidate of candidates) {
+    if (matches.length >= SUGGESTION_LIMIT) {
+      break;
+    }
+    const text = candidate.text;
+    if (
+      text.length > prefix.length &&
+      text.toLowerCase().startsWith(lowered) &&
+      !seen.has(text)
+    ) {
+      seen.add(text);
+      matches.push(candidate);
+    }
+  }
+  return matches;
+}
+
 export interface SegmentGridHandle {
   /**
    * Splice text into the mounted target editor at the caret (replacing any
@@ -74,6 +146,13 @@ export interface SegmentGridHandle {
    * belongs to instead of conflicting after the lock.
    */
   flushDraft: () => void;
+  /**
+   * Open the source editor on the active row (menu/context-menu entry
+   * point; double-clicking the source cell does the same). Returns false
+   * when there is no active row, the row is locked, or source editing is
+   * not wired, so callers can report honestly.
+   */
+  editActiveSource: () => boolean;
 }
 
 export interface SegmentGridProps {
@@ -118,11 +197,39 @@ export interface SegmentGridProps {
    */
   onToggleLock?: (segment: Segment) => void;
   /**
+   * Commits an edited source text through `segment.updateSource` (engine
+   * guards: stale revision, locked row, empty source). Wiring this enables
+   * the source editor: double-click on the source cell, 编辑源文 in the
+   * row menu, or `editActiveSource` on the handle.
+   */
+  onUpdateSource?: (segment: Segment, sourceText: string) => void;
+  /**
+   * Right-click on a row (outside editable fields — those get the native
+   * editing menu from the main process). Return true when a native menu
+   * was popped; false falls back to the grid's own DOM menu, which keeps
+   * hosts without the desktop bridge (tests) working.
+   */
+  onContextMenuRequest?: (
+    segment: Segment,
+    position: { x: number; y: number },
+  ) => boolean;
+  /**
    * Status-bar caret readout: reports the caret's line/column inside the
    * mounted target editor, and null whenever no editor is mounted. Editor
    * local facts only — never guessed from segment text.
    */
   onCaretChange?: (caret: EditorCaret | null) => void;
+  /**
+   * AutoSuggest data source. Called once per editing session, on the
+   * first keystroke — never on mere selection, so locked rows and passive
+   * browsing cost nothing. The workbench composes candidates from engine
+   * results (TM target texts, term targets) and verbatim source numbers;
+   * the editor prefix-filters them while typing. ↑/↓ select, Enter/Tab
+   * accept, Esc dismisses.
+   */
+  onRequestSuggestions?: (
+    segment: Segment,
+  ) => Promise<readonly EditorSuggestion[]>;
   /** Debounce for the typing auto-save; tests may shorten it. */
   autoSaveDelayMs?: number;
   /** Imperative access to the target editor (dock term insertion). */
@@ -226,91 +333,226 @@ function caretPosition(value: string, index: number): EditorCaret {
   return { line, column: index - before.lastIndexOf("\n") };
 }
 
-export function SegmentGrid({
-  segments,
-  activeSegmentId,
-  activeMatch = null,
-  sourceLocale,
-  targetLocale,
-  qaSegmentIds,
-  qaCounts,
-  placeholderAlerts,
-  onSelect,
+interface SourceEditorProps {
+  segment: Segment;
+  /** Commit the edited text (unchanged or blank edits are dropped). */
+  onCommit: (segment: Segment, sourceText: string) => void;
+  /** Editing ended (committed or cancelled); the grid unmounts the editor. */
+  onClose: () => void;
+}
+
+/**
+ * Deliberate, explicit source editing — unlike the target editor there is
+ * no debounced autosave: Ctrl+Enter or leaving the field commits, Esc
+ * cancels without a write. Mounted per segment (keyed by the grid), so the
+ * value can never leak between rows.
+ */
+function SourceEditor({ segment, onCommit, onClose }: SourceEditorProps) {
+  const [value, setValue] = useState(() => segment.sourceText);
+  // Esc must discard: the blur that follows unmount would otherwise commit.
+  const cancelledRef = useRef(false);
+
+  const commit = useCallback(() => {
+    if (cancelledRef.current) {
+      return;
+    }
+    cancelledRef.current = true;
+    const next = value;
+    if (next.trim().length > 0 && next !== segment.sourceText) {
+      onCommit(segment, next);
+    }
+    onClose();
+  }, [value, segment, onCommit, onClose]);
+
+  return (
+    <div className="segment-grid__source-editor">
+      <textarea
+        aria-label={`句段 ${segment.ordinal + 1} 源文`}
+        value={value}
+        autoFocus
+        onChange={(event) => setValue(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) {
+            return;
+          }
+          if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+            event.preventDefault();
+            commit();
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            cancelledRef.current = true;
+            onClose();
+          }
+        }}
+      />
+    </div>
+  );
+}
+
+/** Imperative surface of the mounted target editor, owned per segment. */
+interface TargetEditorHandle {
+  insertAtCaret: (text: string) => boolean;
+  confirm: (mode: ConfirmMode) => boolean;
+  focus: () => void;
+  flush: () => void;
+}
+
+interface TargetEditorProps {
+  /** Latest object for the edited segment (fresh revision after saves). */
+  segment: Segment;
+  ariaLabel: string;
+  autoSaveDelayMs: number;
+  onSaveDraft: SegmentGridProps["onSaveDraft"];
+  onConfirm: SegmentGridProps["onConfirm"];
+  onCaretChange?: ((caret: EditorCaret | null) => void) | undefined;
+  onRequestSuggestions?: SegmentGridProps["onRequestSuggestions"] | undefined;
+  /** Escape pressed: the pending draft is already flushed; leave editing. */
+  onExit: () => void;
+  editorRef: RefObject<TargetEditorHandle | null>;
+}
+
+/**
+ * The one mounted target editor. The grid keys this component by segment
+ * id, so switching rows unmounts the old editor (flushing its unsaved
+ * typing) and mounts a fresh one whose draft state is initialized from the
+ * new segment during the very first render. The editor can therefore never
+ * paint another segment's text — the state never outlives its segment.
+ */
+function TargetEditor({
+  segment,
+  ariaLabel,
+  autoSaveDelayMs,
   onSaveDraft,
   onConfirm,
-  onCopySource,
-  onClearTarget,
-  onToggleLock,
   onCaretChange,
-  autoSaveDelayMs = AUTO_SAVE_DELAY_MS,
-  ref,
-}: SegmentGridProps) {
-  const [draft, setDraft] = useState("");
-  // Selection and editing are separate states (Trados grid model): the
-  // selected row is the query pivot, editing mounts the target editor.
-  // Editing starts on (selection lands in the editor so the type→confirm
-  // loop never needs an extra keypress); Esc drops to row-navigation mode
-  // where ↑/↓ move the selection and Enter re-enters the editor.
-  const [editing, setEditing] = useState(true);
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  onRequestSuggestions,
+  onExit,
+  editorRef,
+}: TargetEditorProps) {
+  // Seeded during the first render of this mounted segment; re-seeded only
+  // by an outside write to the committed target (effect below).
+  const [draft, setDraft] = useState(() => segment.targetText);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const rowRefs = useRef(new Map<string, HTMLTableRowElement>());
-  // Set when Esc leaves the editor, so focus lands on the row (the
-  // textarea is gone by the time the effect runs).
-  const pendingRowFocusRef = useRef(false);
+  // Mirror for callbacks that outlive renders (candidate fetch, flush,
+  // confirm) — always the latest segment object with the fresh revision.
+  const segmentRef = useRef(segment);
+  segmentRef.current = segment;
+  // AutoSuggest: the word prefix being typed (null = popup closed). The
+  // caret is a DOM fact, so this is set from input events, never derived
+  // during render.
+  const [suggestAnchor, setSuggestAnchor] = useState<{
+    start: number;
+    text: string;
+  } | null>(null);
+  const [suggestIndex, setSuggestIndex] = useState(0);
+  // Candidates arrive lazily: requested on the first keystroke of this
+  // editing session (never on mere selection), then filtered locally.
+  const [candidates, setCandidates] = useState<
+    readonly EditorSuggestion[] | null
+  >(null);
+  const candidatesRequestedRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const onRequestSuggestionsRef = useRef(onRequestSuggestions);
+  onRequestSuggestionsRef.current = onRequestSuggestions;
+  const requestCandidates = useCallback(() => {
+    const request = onRequestSuggestionsRef.current;
+    if (candidatesRequestedRef.current || !request) {
+      return;
+    }
+    candidatesRequestedRef.current = true;
+    request(segmentRef.current)
+      .then((list) => {
+        if (mountedRef.current) {
+          setCandidates(list);
+        }
+      })
+      .catch(() => {
+        // No candidates: the popup honestly stays away.
+      });
+  }, []);
+  const suggestMatches = useMemo(
+    () =>
+      suggestAnchor && candidates && candidates.length > 0
+        ? filterSuggestions(candidates, suggestAnchor.text)
+        : [],
+    [candidates, suggestAnchor],
+  );
+  const suggestOpen = suggestAnchor !== null && suggestMatches.length > 0;
+
+  const refreshSuggestAnchor = useCallback((textarea: HTMLTextAreaElement) => {
+    // A selection is never a prefix; only a collapsed caret suggests.
+    if (textarea.selectionStart !== textarea.selectionEnd) {
+      setSuggestAnchor(null);
+      return;
+    }
+    setSuggestAnchor(
+      suggestPrefixAt(textarea.value, textarea.selectionStart ?? 0),
+    );
+    setSuggestIndex(0);
+  }, []);
+
+  const acceptSuggestion = useCallback(
+    (textarea: HTMLTextAreaElement, suggestion: EditorSuggestion) => {
+      const anchor = suggestAnchor;
+      if (!anchor) {
+        return;
+      }
+      const caret = textarea.selectionStart ?? textarea.value.length;
+      const next =
+        textarea.value.slice(0, anchor.start) +
+        suggestion.text +
+        textarea.value.slice(caret);
+      pendingCaretRef.current = anchor.start + suggestion.text.length;
+      setDraft(next);
+      setSuggestAnchor(null);
+    },
+    [suggestAnchor],
+  );
   // Splicing into the value mid-IME-composition would corrupt the composed
   // input, so inserts requested while composing are queued and flushed on
   // compositionend.
   const composingRef = useRef(false);
   const pendingInsertRef = useRef("");
   const pendingCaretRef = useRef<number | null>(null);
-  const heightsRef = useRef(new Map<string, number>());
-  const [scrollTop, setScrollTop] = useState(0);
-  const [viewportHeight, setViewportHeight] = useState(FALLBACK_VIEWPORT);
-  // Bumped when a measured row height changes so offsets are recomputed.
-  const [, setMeasureVersion] = useState(0);
-  // Row whose ⋯ menu is open (right-click or the hover dots).
-  const [menuSegmentId, setMenuSegmentId] = useState<string | null>(null);
-
-  const activeSegment =
-    segments.find((segment) => segment.id === activeSegmentId) ?? null;
 
   // --- Trados-style draft lifecycle -------------------------------------
   // Typing never needs a save button: the text is handed to onSaveDraft
-  // after a short pause and flushed when the selection leaves the segment.
-  // These mirrors let the flush/debounce callbacks (which outlive renders)
-  // read the live values without re-subscribing.
+  // after a short pause and flushed when the editor unmounts (selection
+  // moved away, filter hid the row, document closed). These mirrors let
+  // the flush/debounce callbacks (which outlive renders) read live values.
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const onSaveDraftRef = useRef(onSaveDraft);
   onSaveDraftRef.current = onSaveDraft;
   // The last text handed off for persistence (or seeded from the committed
   // target). Anything newer than this is "unsaved typing".
-  const savedTextRef = useRef("");
+  const savedTextRef = useRef(segment.targetText);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Bumped to re-arm the debounce when no draft change occurs (IME commit).
   const [saveTick, setSaveTick] = useState(0);
-  // Latest object for the selected segment (fresh revision after saves);
-  // set by an effect below AFTER the segment-switch flush has run, so a
-  // flush always targets the segment the text belongs to.
-  const flushSegmentRef = useRef<Segment | null>(null);
 
-  // Persist the pending draft now (leave-segment flush and timer body).
+  // Persist the pending draft now (unmount flush and timer body).
   const commitDraftSave = useCallback(() => {
     if (saveTimerRef.current !== null) {
       clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
-    const segment = flushSegmentRef.current;
-    if (!segment) {
-      return;
-    }
+    const target = segmentRef.current;
     const text = draftRef.current;
     if (text === savedTextRef.current) {
       return;
     }
     savedTextRef.current = text;
-    const outcome = onSaveDraftRef.current(segment, text);
+    const outcome = onSaveDraftRef.current(target, text);
     if (
       outcome &&
       typeof (outcome as Promise<void | boolean>).then === "function"
@@ -320,7 +562,7 @@ export function SegmentGrid({
         // newer text was handed off meanwhile) so the next flush retries
         // the same text instead of silently dropping it.
         if (acked === false && savedTextRef.current === text) {
-          savedTextRef.current = segment.targetText;
+          savedTextRef.current = target.targetText;
         }
       });
     }
@@ -336,29 +578,12 @@ export function SegmentGrid({
     savedTextRef.current = text;
   }, []);
 
-  // Selection moved to another segment: leaving never confirms (Studio
-  // semantics), but unsaved typing is flushed as a draft first. Then the
-  // editor re-seeds from the newly selected segment; any in-flight
-  // composition or queued insert belonged to the old text.
-  useEffect(() => {
-    commitDraftSave();
-    const seeded = activeSegment?.targetText ?? "";
-    setDraft(seeded);
-    savedTextRef.current = seeded;
-    composingRef.current = false;
-    pendingInsertRef.current = "";
-    pendingCaretRef.current = null;
-  }, [activeSegment?.id]);
-
   // An outside write landed in the committed target of the segment being
   // edited (TM apply, AI draft, replace, row menu): re-seed the editor.
   // Our own auto-save echo is recognized by matching the handed-off text
   // and never clobbers typing that happened while the save was in flight.
   useEffect(() => {
-    if (!activeSegment) {
-      return;
-    }
-    const target = activeSegment.targetText;
+    const target = segment.targetText;
     if (target === draftRef.current || target === savedTextRef.current) {
       return;
     }
@@ -367,18 +592,13 @@ export function SegmentGrid({
     composingRef.current = false;
     pendingInsertRef.current = "";
     pendingCaretRef.current = null;
-  }, [activeSegment?.targetText]);
-
-  // Runs after the two effects above, so the segment-switch flush still
-  // saw the previous segment while this keeps revisions fresh in between.
-  useEffect(() => {
-    flushSegmentRef.current = activeSegment;
-  });
+    setSuggestAnchor(null);
+  }, [segment.targetText]);
 
   // Debounced auto-save: re-armed on every keystroke, quiet during IME
   // composition (compositionend bumps saveTick to re-arm).
   useEffect(() => {
-    if (!activeSegment || composingRef.current) {
+    if (composingRef.current) {
       return;
     }
     if (draft === savedTextRef.current) {
@@ -399,10 +619,10 @@ export function SegmentGrid({
         saveTimerRef.current = null;
       }
     };
-  }, [draft, saveTick, activeSegment?.id, autoSaveDelayMs, commitDraftSave]);
+  }, [draft, saveTick, autoSaveDelayMs, commitDraftSave]);
 
-  // The editor can unmount with pending text (filter hides the row, the
-  // document or project closes): flush it, exactly like leaving a segment.
+  // Unmounting flushes pending text exactly like leaving a segment did:
+  // the selection moved on, a filter hid the row, or the document closed.
   useEffect(() => {
     return () => commitDraftSave();
   }, [commitDraftSave]);
@@ -433,40 +653,31 @@ export function SegmentGrid({
   }, [draft]);
 
   /** Reads the caret straight off the mounted textarea (never guessed). */
+  const onCaretChangeRef = useRef(onCaretChange);
+  onCaretChangeRef.current = onCaretChange;
   const reportCaret = useCallback(() => {
-    if (!onCaretChange) {
-      return;
-    }
+    const report = onCaretChangeRef.current;
     const textarea = textareaRef.current;
-    if (!textarea) {
+    if (!report || !textarea) {
       return;
     }
-    onCaretChange(
+    report(
       caretPosition(
         textarea.value,
         textarea.selectionStart ?? textarea.value.length,
       ),
     );
-  }, [onCaretChange]);
+  }, []);
 
-  // Status-bar caret readout: report when an editor mounts (or the active
-  // row changes), clear the moment there is no editor — including unmount.
+  // Status-bar caret readout: report when the editor mounts, clear the
+  // moment it unmounts — no editor, no caret.
   useEffect(() => {
-    if (!onCaretChange) {
-      return;
-    }
-    if (!editing || !activeSegment) {
-      onCaretChange(null);
-      return;
-    }
     reportCaret();
-  }, [onCaretChange, editing, activeSegment, reportCaret]);
-  useEffect(() => {
-    return () => onCaretChange?.(null);
-  }, [onCaretChange]);
+    return () => onCaretChangeRef.current?.(null);
+  }, [reportCaret]);
 
   useImperativeHandle(
-    ref,
+    editorRef,
     () => ({
       insertAtCaret: (text: string) => {
         const textarea = textareaRef.current;
@@ -480,18 +691,240 @@ export function SegmentGrid({
         spliceIntoEditor(textarea, text);
         return true;
       },
-      confirmActive: (mode: ConfirmMode = "nextUnconfirmed") => {
-        if (!textareaRef.current || !activeSegment || composingRef.current) {
+      confirm: (mode: ConfirmMode) => {
+        if (!textareaRef.current || composingRef.current) {
           return false;
         }
         handOffToConfirm(draft);
-        onConfirm(activeSegment, draft, mode);
+        onConfirm(segmentRef.current, draft, mode);
         return true;
       },
+      focus: () => {
+        textareaRef.current?.focus();
+      },
+      flush: () => commitDraftSave(),
+    }),
+    [spliceIntoEditor, draft, onConfirm, handOffToConfirm, commitDraftSave],
+  );
+
+  return (
+    <div className="segment-grid__target-editor">
+      <textarea
+        aria-label={ariaLabel}
+        ref={textareaRef}
+        value={draft}
+        autoFocus
+        aria-autocomplete={onRequestSuggestions ? "list" : undefined}
+        aria-expanded={onRequestSuggestions ? suggestOpen : undefined}
+        onChange={(event) => {
+          setDraft(event.target.value);
+          reportCaret();
+          if (!composingRef.current) {
+            requestCandidates();
+            refreshSuggestAnchor(event.target);
+          }
+        }}
+        // Fires on every caret move (keyboard or mouse), so
+        // the status-bar readout tracks the real position.
+        onSelect={(event) => {
+          reportCaret();
+          // A caret that wandered off the typed prefix ends the popup;
+          // typing keeps the caret exactly at the prefix end.
+          const caret = event.currentTarget.selectionStart ?? 0;
+          setSuggestAnchor((anchor) =>
+            anchor && caret === anchor.start + anchor.text.length
+              ? anchor
+              : null,
+          );
+        }}
+        onBlur={() => setSuggestAnchor(null)}
+        onCompositionStart={() => {
+          composingRef.current = true;
+          setSuggestAnchor(null);
+        }}
+        onCompositionEnd={(event) => {
+          composingRef.current = false;
+          const pending = pendingInsertRef.current;
+          if (pending.length > 0) {
+            pendingInsertRef.current = "";
+            spliceIntoEditor(event.currentTarget, pending);
+          }
+          // Text committed by the IME must reach the debounced draft save
+          // even when no further input follows.
+          setSaveTick((tick) => tick + 1);
+          requestCandidates();
+          refreshSuggestAnchor(event.currentTarget);
+        }}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) {
+            // Mid-composition keys belong to the IME: Enter commits the
+            // composed text, Esc cancels the composition — never the
+            // segment.
+            return;
+          }
+          const plain = !event.ctrlKey && !event.metaKey && !event.altKey;
+          if (suggestOpen && plain) {
+            // The popup owns ↑/↓/Enter/Tab/Esc while it is open; the
+            // confirm chords keep Ctrl/Cmd so they are never shadowed.
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              event.preventDefault();
+              const delta = event.key === "ArrowDown" ? 1 : -1;
+              setSuggestIndex(
+                (index) =>
+                  (index + delta + suggestMatches.length) %
+                  suggestMatches.length,
+              );
+              return;
+            }
+            if (
+              (event.key === "Enter" && !event.shiftKey) ||
+              event.key === "Tab"
+            ) {
+              event.preventDefault();
+              const chosen = suggestMatches[suggestIndex];
+              if (chosen) {
+                acceptSuggestion(event.currentTarget, chosen);
+              }
+              return;
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setSuggestAnchor(null);
+              return;
+            }
+          }
+          const mode = confirmModeForKey(event);
+          if (mode) {
+            event.preventDefault();
+            handOffToConfirm(draft);
+            onConfirm(segmentRef.current, draft, mode);
+            return;
+          }
+          if (event.key === "Escape") {
+            // Exit editing without confirming and without losing typing:
+            // the draft flushes as a draft and focus drops to the row for
+            // ↑/↓ travel.
+            event.preventDefault();
+            commitDraftSave();
+            onExit();
+          }
+        }}
+      />
+      {suggestOpen ? (
+        <div
+          className="segment-grid__suggest"
+          role="listbox"
+          aria-label="自动建议"
+        >
+          {suggestMatches.map((suggestion, index) => (
+            <button
+              type="button"
+              role="option"
+              aria-selected={index === suggestIndex}
+              data-selected={index === suggestIndex || undefined}
+              className="segment-grid__suggest-item"
+              key={`${suggestion.kind}:${suggestion.text}`}
+              // Keep focus in the textarea so the click can splice at the
+              // caret; the blur handler would otherwise close the popup
+              // before the click lands.
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                const textarea = textareaRef.current;
+                if (textarea) {
+                  acceptSuggestion(textarea, suggestion);
+                }
+              }}
+            >
+              <span
+                className="segment-grid__suggest-kind"
+                data-kind={suggestion.kind}
+              >
+                {SUGGESTION_KIND_LABEL[suggestion.kind]}
+              </span>
+              <span className="segment-grid__suggest-text">
+                {suggestion.text}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function SegmentGrid({
+  segments,
+  activeSegmentId,
+  activeMatch = null,
+  sourceLocale,
+  targetLocale,
+  qaSegmentIds,
+  qaCounts,
+  placeholderAlerts,
+  onSelect,
+  onSaveDraft,
+  onConfirm,
+  onCopySource,
+  onClearTarget,
+  onToggleLock,
+  onUpdateSource,
+  onContextMenuRequest,
+  onCaretChange,
+  onRequestSuggestions,
+  autoSaveDelayMs = AUTO_SAVE_DELAY_MS,
+  ref,
+}: SegmentGridProps) {
+  // Selection and editing are separate states (Trados grid model): the
+  // selected row is the query pivot, editing mounts the target editor.
+  // Editing starts on (selection lands in the editor so the type→confirm
+  // loop never needs an extra keypress); Esc drops to row-navigation mode
+  // where ↑/↓ move the selection and Enter re-enters the editor.
+  const [editing, setEditing] = useState(true);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  // Imperative surface of the one mounted editor; null between mounts.
+  const editorHandleRef = useRef<TargetEditorHandle | null>(null);
+  const rowRefs = useRef(new Map<string, HTMLTableRowElement>());
+  // Set when Esc leaves the editor, so focus lands on the row (the
+  // textarea is gone by the time the effect runs).
+  const pendingRowFocusRef = useRef(false);
+  const heightsRef = useRef(new Map<string, number>());
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(FALLBACK_VIEWPORT);
+  // Bumped when a measured row height changes so offsets are recomputed.
+  const [, setMeasureVersion] = useState(0);
+  // Row whose ⋯ menu is open (right-click or the hover dots).
+  const [menuSegmentId, setMenuSegmentId] = useState<string | null>(null);
+  // Row whose source cell is being edited (one at a time, like the target).
+  const [sourceEditingId, setSourceEditingId] = useState<string | null>(null);
+
+  const handleEditorExit = useCallback(() => {
+    pendingRowFocusRef.current = true;
+    setEditing(false);
+  }, []);
+
+  const beginSourceEdit = useCallback(
+    (segment: Segment): boolean => {
+      if (!onUpdateSource || segment.locked === true) {
+        return false;
+      }
+      onSelect(segment.id);
+      setSourceEditingId(segment.id);
+      return true;
+    },
+    [onUpdateSource, onSelect],
+  );
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      insertAtCaret: (text: string) =>
+        editorHandleRef.current?.insertAtCaret(text) ?? false,
+      confirmActive: (mode: ConfirmMode = "nextUnconfirmed") =>
+        editorHandleRef.current?.confirm(mode) ?? false,
       focusActive: () => {
-        const textarea = textareaRef.current;
-        if (textarea) {
-          textarea.focus();
+        const editor = editorHandleRef.current;
+        if (editor) {
+          editor.focus();
           return true;
         }
         if (activeSegmentId) {
@@ -503,17 +936,13 @@ export function SegmentGrid({
         }
         return false;
       },
-      flushDraft: () => commitDraftSave(),
+      flushDraft: () => editorHandleRef.current?.flush(),
+      editActiveSource: () => {
+        const segment = segments.find((row) => row.id === activeSegmentId);
+        return segment ? beginSourceEdit(segment) : false;
+      },
     }),
-    [
-      spliceIntoEditor,
-      activeSegment,
-      activeSegmentId,
-      draft,
-      onConfirm,
-      handOffToConfirm,
-      commitDraftSave,
-    ],
+    [activeSegmentId, segments, beginSourceEdit],
   );
 
   // --- Roving focus ------------------------------------------------------
@@ -814,74 +1243,64 @@ export function SegmentGrid({
                 }}
                 onKeyDown={(event) => handleRowKeyDown(event, segment)}
                 onContextMenu={(event) => {
+                  // Editable fields keep the platform editing menu (cut/
+                  // copy/paste), popped natively by the main process.
+                  const target = event.target;
+                  if (
+                    target instanceof Element &&
+                    target.closest("textarea, input")
+                  ) {
+                    return;
+                  }
                   event.preventDefault();
                   onSelect(segment.id);
-                  setMenuSegmentId(segment.id);
+                  const handledNatively =
+                    onContextMenuRequest?.(segment, {
+                      x: event.clientX,
+                      y: event.clientY,
+                    }) === true;
+                  if (!handledNatively) {
+                    setMenuSegmentId(segment.id);
+                  }
                 }}
               >
                 <td className="segment-grid__ordinal">{segment.ordinal + 1}</td>
-                <td className="segment-grid__source">
-                  <TokenText
-                    text={segment.sourceText}
-                    dangerTokens={alert?.missing}
-                  />
+                <td
+                  className="segment-grid__source"
+                  onDoubleClick={
+                    onUpdateSource && !locked
+                      ? () => beginSourceEdit(segment)
+                      : undefined
+                  }
+                >
+                  {sourceEditingId === segment.id && onUpdateSource ? (
+                    <SourceEditor
+                      key={segment.id}
+                      segment={segment}
+                      onCommit={onUpdateSource}
+                      onClose={() => setSourceEditingId(null)}
+                    />
+                  ) : (
+                    <TokenText
+                      text={segment.sourceText}
+                      dangerTokens={alert?.missing}
+                    />
+                  )}
                 </td>
                 <td className="segment-grid__target">
                   {isEditing ? (
-                    <div className="segment-grid__target-editor">
-                      <textarea
-                        aria-label={`句段 ${segment.ordinal + 1} 译文`}
-                        ref={textareaRef}
-                        value={draft}
-                        autoFocus
-                        onChange={(event) => {
-                          setDraft(event.target.value);
-                          reportCaret();
-                        }}
-                        // Fires on every caret move (keyboard or mouse), so
-                        // the status-bar readout tracks the real position.
-                        onSelect={reportCaret}
-                        onCompositionStart={() => {
-                          composingRef.current = true;
-                        }}
-                        onCompositionEnd={(event) => {
-                          composingRef.current = false;
-                          const pending = pendingInsertRef.current;
-                          if (pending.length > 0) {
-                            pendingInsertRef.current = "";
-                            spliceIntoEditor(event.currentTarget, pending);
-                          }
-                          // Text committed by the IME must reach the
-                          // debounced draft save even when no further
-                          // input follows.
-                          setSaveTick((tick) => tick + 1);
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.nativeEvent.isComposing) {
-                            // Mid-composition keys belong to the IME:
-                            // Enter commits the composed text, Esc cancels
-                            // the composition — never the segment.
-                            return;
-                          }
-                          const mode = confirmModeForKey(event);
-                          if (mode) {
-                            event.preventDefault();
-                            handOffToConfirm(draft);
-                            onConfirm(segment, draft, mode);
-                            return;
-                          }
-                          if (event.key === "Escape") {
-                            // Exit editing without confirming and without
-                            // losing typing: the draft flushes as a draft
-                            // and focus drops to the row for ↑/↓ travel.
-                            event.preventDefault();
-                            commitDraftSave();
-                            pendingRowFocusRef.current = true;
-                            setEditing(false);
-                          }
-                        }}
-                      />
-                    </div>
+                    <TargetEditor
+                      key={segment.id}
+                      segment={segment}
+                      ariaLabel={`句段 ${segment.ordinal + 1} 译文`}
+                      autoSaveDelayMs={autoSaveDelayMs}
+                      onSaveDraft={onSaveDraft}
+                      onConfirm={onConfirm}
+                      onCaretChange={onCaretChange}
+                      onRequestSuggestions={onRequestSuggestions}
+                      onExit={handleEditorExit}
+                      editorRef={editorHandleRef}
+                    />
                   ) : (
                     <TokenText
                       text={segment.targetText}
@@ -937,7 +1356,10 @@ export function SegmentGrid({
                         title={`TM 最佳匹配 ${activeMatch.score}%`}
                       />
                     ) : null}
-                    {onCopySource || onClearTarget || onToggleLock ? (
+                    {onCopySource ||
+                    onClearTarget ||
+                    onToggleLock ||
+                    onUpdateSource ? (
                       <span className="segment-grid__menu-wrap">
                         <button
                           type="button"
@@ -986,6 +1408,21 @@ export function SegmentGrid({
                                 }}
                               >
                                 清空译文
+                              </button>
+                            ) : null}
+                            {onUpdateSource ? (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="segment-grid__menu-item"
+                                disabled={locked}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setMenuSegmentId(null);
+                                  beginSourceEdit(segment);
+                                }}
+                              >
+                                编辑源文
                               </button>
                             ) : null}
                             {onToggleLock ? (

@@ -318,6 +318,7 @@ export function buildMenuTemplate(
       ),
       commandItem("复制源文到译文", "copy-source", context.documentOpen),
       commandItem("清空译文", "clear-target", context.documentOpen),
+      commandItem("编辑源文", "edit-source", context.documentOpen),
       SEPARATOR,
       commandItem("预翻译（TM）", "pretranslate", context.documentOpen),
       // The editor's Ctrl+1…9 family applies numbered matches; the menu

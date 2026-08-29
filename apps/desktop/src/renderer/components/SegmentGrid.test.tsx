@@ -6,7 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { createRef } from "react";
+import { createRef, useLayoutEffect } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { Segment } from "@translunar/contracts";
@@ -33,6 +33,23 @@ function segment(
     contextHash: "context",
     updatedAtMs: 1,
   };
+}
+
+/**
+ * Records the target editor's value once per React commit, from a layout
+ * effect — i.e. before the browser would paint that commit. Any value
+ * captured here is a value the user could see flash on screen.
+ */
+function EditorPaintProbe({ log }: { log: string[] }) {
+  useLayoutEffect(() => {
+    const editor = document.querySelector<HTMLTextAreaElement>(
+      ".segment-grid__target-editor textarea",
+    );
+    if (editor) {
+      log.push(editor.value);
+    }
+  });
+  return null;
 }
 
 describe("SegmentGrid", () => {
@@ -75,6 +92,236 @@ describe("SegmentGrid", () => {
     ];
     expect(confirmedSegment.id).toBe("s1");
     expect(draft).toBe("你好。");
+  });
+
+  it("never paints the previous segment's text when the selection moves (flash regression)", () => {
+    // Bug report: segment 48 holds "240"; clicking the empty segment 66
+    // flashed "240" inside 66's editor for one frame before it cleared.
+    const paints: string[] = [];
+    const rows = [
+      segment("s48", 47, "测温", "240"),
+      segment("s66", 65, "色板"),
+    ];
+    const shared = {
+      segments: rows,
+      qaSegmentIds: new Set<string>(),
+      onSelect: vi.fn(),
+      onSaveDraft: vi.fn(),
+      onConfirm: vi.fn(),
+    };
+    const { rerender } = render(
+      <>
+        <SegmentGrid {...shared} activeSegmentId="s48" />
+        <EditorPaintProbe log={paints} />
+      </>,
+    );
+    expect(paints.at(-1)).toBe("240");
+    const before = paints.length;
+    rerender(
+      <>
+        <SegmentGrid {...shared} activeSegmentId="s66" />
+        <EditorPaintProbe log={paints} />
+      </>,
+    );
+    const afterSwitch = paints.slice(before);
+    // Every value committed after the switch belongs to segment 66: the
+    // editor must never hold "240" at any paintable moment.
+    expect(afterSwitch.length).toBeGreaterThan(0);
+    expect(afterSwitch).not.toContain("240");
+    expect(afterSwitch.at(-1)).toBe("");
+  });
+
+  it("edits the source on double-click and commits with Ctrl+Enter", async () => {
+    const onUpdateSource = vi.fn();
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "Helo world.", "你好。")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onUpdateSource={onUpdateSource}
+      />,
+    );
+    await userEvent.dblClick(screen.getByText("Helo world."));
+    const editor = screen.getByLabelText("句段 1 源文");
+    expect(editor).toHaveValue("Helo world.");
+    await userEvent.clear(editor);
+    await userEvent.type(editor, "Hello world.");
+    fireEvent.keyDown(editor, { key: "Enter", ctrlKey: true });
+    expect(onUpdateSource).toHaveBeenCalledTimes(1);
+    const [edited, text] = onUpdateSource.mock.calls[0] as [Segment, string];
+    expect(edited.id).toBe("s1");
+    expect(text).toBe("Hello world.");
+    // The editor closed and the cell shows the (still-propped) source text.
+    expect(screen.queryByLabelText("句段 1 源文")).not.toBeInTheDocument();
+  });
+
+  it("cancels a source edit with Escape without writing", async () => {
+    const onUpdateSource = vi.fn();
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "Hello.", "你好。")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onUpdateSource={onUpdateSource}
+      />,
+    );
+    await userEvent.dblClick(screen.getByText("Hello."));
+    const editor = screen.getByLabelText("句段 1 源文");
+    await userEvent.type(editor, " typed");
+    fireEvent.keyDown(editor, { key: "Escape" });
+    expect(onUpdateSource).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("句段 1 源文")).not.toBeInTheDocument();
+  });
+
+  it("never opens the source editor on a locked row", async () => {
+    const locked = { ...segment("s1", 0, "Hello.", "你好。"), locked: true };
+    render(
+      <SegmentGrid
+        segments={[locked]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onUpdateSource={vi.fn()}
+      />,
+    );
+    await userEvent.dblClick(screen.getByText("Hello."));
+    expect(screen.queryByLabelText("句段 1 源文")).not.toBeInTheDocument();
+  });
+
+  it("offers prefix-filtered AutoSuggest candidates and accepts with Enter", async () => {
+    const onRequestSuggestions = vi.fn(() =>
+      Promise.resolve([
+        { text: "温度测量范围", kind: "tm" as const },
+        { text: "Temperature", kind: "term" as const },
+        { text: "150", kind: "number" as const },
+      ]),
+    );
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "Temperature range -20°C~150°C.")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onRequestSuggestions={onRequestSuggestions}
+      />,
+    );
+    const editor = screen.getByLabelText("句段 1 译文");
+    // Candidates are fetched lazily: nothing before the first keystroke.
+    expect(onRequestSuggestions).not.toHaveBeenCalled();
+    await userEvent.type(editor, "Temp");
+    // One fetch per editing session, regardless of keystroke count.
+    expect(onRequestSuggestions).toHaveBeenCalledTimes(1);
+    // Prefix "Temp" matches only the term candidate.
+    const option = await screen.findByRole("option", { name: /Temperature/ });
+    expect(option).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: /150/ }),
+    ).not.toBeInTheDocument();
+    fireEvent.keyDown(editor, { key: "Enter" });
+    expect(editor).toHaveValue("Temperature");
+    // Accepting closed the popup.
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("cycles AutoSuggest with arrows and dismisses with Escape without leaving the editor", async () => {
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "240×240 display.")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onRequestSuggestions={() =>
+          Promise.resolve<{ text: string; kind: "tm" | "term" | "number" }[]>([
+            { text: "240×240", kind: "tm" },
+            { text: "240", kind: "number" },
+          ])
+        }
+      />,
+    );
+    const editor = screen.getByLabelText("句段 1 译文");
+    await userEvent.type(editor, "24");
+    await screen.findByRole("listbox");
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    fireEvent.keyDown(editor, { key: "ArrowDown" });
+    fireEvent.keyDown(editor, { key: "Enter" });
+    expect(editor).toHaveValue("240");
+    // Type again, then Escape: the popup closes but editing continues.
+    await userEvent.type(editor, " 24");
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    fireEvent.keyDown(editor, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("句段 1 译文")).toBeInTheDocument();
+  });
+
+  it("prefers the native context menu and suppresses the DOM fallback", () => {
+    const onContextMenuRequest = vi.fn(() => true);
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "Hello.", "你好。")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onCopySource={vi.fn()}
+        onContextMenuRequest={onContextMenuRequest}
+      />,
+    );
+    fireEvent.contextMenu(screen.getByText("Hello."));
+    expect(onContextMenuRequest).toHaveBeenCalledTimes(1);
+    const [seg] = onContextMenuRequest.mock.calls[0] as unknown as [Segment];
+    expect(seg.id).toBe("s1");
+    // Handled natively: the grid's own DOM menu must not stack on top.
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the DOM row menu when no native menu is available", () => {
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "Hello.", "你好。")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onCopySource={vi.fn()}
+        onContextMenuRequest={() => false}
+      />,
+    );
+    fireEvent.contextMenu(screen.getByText("Hello."));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
+
+  it("leaves right-clicks inside the target editor to the native editing menu", () => {
+    const onContextMenuRequest = vi.fn(() => true);
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "Hello.", "你好。")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onContextMenuRequest={onContextMenuRequest}
+      />,
+    );
+    fireEvent.contextMenu(screen.getByLabelText("句段 1 译文"));
+    // The main process pops the platform editing menu for editable fields;
+    // the row menu must not fire at all.
+    expect(onContextMenuRequest).not.toHaveBeenCalled();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
   it("renders no per-row save/confirm buttons in the active row", () => {

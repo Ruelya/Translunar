@@ -1801,6 +1801,87 @@ button.app-statusbar__jump:hover {
   field-sizing: content;
 }
 
+/* AutoSuggest: a small listbox anchored under the target editor. Data is
+   TM/term/number material already on screen elsewhere — the popup is a
+   faster hand, not a second brain. */
+.segment-grid__target-editor {
+  position: relative;
+}
+
+.segment-grid__suggest {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  max-width: 360px;
+  padding: var(--tl-space-1);
+  border: 1px solid var(--tl-color-border-strong);
+  border-radius: var(--tl-radius-md);
+  background: var(--tl-color-surface-raised);
+  box-shadow: var(--tl-shadow-pop);
+}
+
+.segment-grid__suggest-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--tl-space-2);
+  width: 100%;
+  padding: 4px var(--tl-space-2);
+  border: none;
+  border-radius: var(--tl-radius-sm);
+  background: transparent;
+  color: var(--tl-color-text);
+  font-size: var(--tl-text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.segment-grid__suggest-item:hover,
+.segment-grid__suggest-item[data-selected] {
+  background: var(--tl-color-sunken);
+}
+
+.segment-grid__suggest-kind {
+  flex: none;
+  font-size: var(--tl-text-xs);
+  color: var(--tl-color-text-faint);
+  letter-spacing: 0.02em;
+}
+
+.segment-grid__suggest-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Source editing shares the same geometry-stable inline box; a dashed
+   underline marks that this deliberate edit rewrites the imported source. */
+.segment-grid__source-editor {
+  display: flex;
+  flex-direction: column;
+}
+
+.segment-grid__source-editor textarea {
+  display: block;
+  width: 100%;
+  font: inherit;
+  line-height: 1.5;
+  border: none;
+  border-bottom: 1px dashed var(--tl-color-border-strong);
+  outline: none;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  margin: 0;
+  resize: none;
+  overflow: hidden;
+  field-sizing: content;
+}
+
 /* Language tags in the column headers: lowercase BCP-47, deliberately
    quieter than the uppercase column titles. */
 .segment-grid__locale {

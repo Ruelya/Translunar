@@ -67,6 +67,7 @@ export type MenuCommand =
   | "toggle-lock-segment"
   | "copy-source"
   | "clear-target"
+  | "edit-source"
   | "pretranslate"
   | "insert-tm"
   | "insert-term"
@@ -95,13 +96,7 @@ export type MenuCommand =
  * menu buttons, so the strip can never drift from the template.
  */
 export type MenuBarItemId =
-  | "file"
-  | "edit"
-  | "view"
-  | "project"
-  | "translate"
-  | "qa"
-  | "help";
+  "file" | "edit" | "view" | "project" | "translate" | "qa" | "help";
 
 export interface MenuBarItem {
   id: MenuBarItemId;
@@ -131,6 +126,20 @@ export interface MenuContext {
    * this persisted value. False whenever no project is open.
    */
   exportGate: boolean;
+}
+
+/**
+ * What the renderer knows about the right-clicked segment row, carried to
+ * the native context menu so its items and enablement stay honest. Facts
+ * only — the row's stored flags, never re-judged state.
+ */
+export interface SegmentMenuContext {
+  /** 0-based ordinal; the menu shows 句段 N as its header. */
+  ordinal: number;
+  locked: boolean;
+  hasTarget: boolean;
+  /** Whether the workbench wired source editing (segment.updateSource). */
+  sourceEditable: boolean;
 }
 
 /**
@@ -194,6 +203,18 @@ export interface DesktopApi {
    * menu bar uses) at window coordinates; resolves when the menu closes.
    */
   popupAppMenu(menuId: MenuBarItemId, x: number, y: number): Promise<void>;
+  /**
+   * Pop the native right-click menu for one segment row at window
+   * coordinates. Item clicks come back as ordinary menu commands over
+   * `onMenuCommand` — the renderer selected the row before popping, so the
+   * commands operate on the intended segment. Resolves when the menu
+   * closes.
+   */
+  popupSegmentMenu(
+    context: SegmentMenuContext,
+    x: number,
+    y: number,
+  ): Promise<void>;
   /** Repaint the native window-button overlay to match the active theme. */
   setTitlebarOverlay(colors: TitlebarOverlayColors): void;
 }
@@ -215,6 +236,7 @@ export const IPC_CHANNELS = {
   menuCommand: "tl:menu:command",
   menuContext: "tl:menu:context",
   menuPopup: "tl:menu:popup",
+  segmentMenuPopup: "tl:menu:segment-popup",
   nativeScheme: "tl:window:native-scheme",
   titlebarOverlay: "tl:window:titlebar-overlay",
 } as const;

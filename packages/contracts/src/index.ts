@@ -56,6 +56,7 @@ export const ENGINE_METHODS = [
   "document.export",
   "segment.list",
   "segment.update",
+  "segment.updateSource",
   "segment.replace",
   "segment.confirm",
   "segment.lock",

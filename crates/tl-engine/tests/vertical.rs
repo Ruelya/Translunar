@@ -17,7 +17,7 @@ use tl_protocol::{
     AiAssistRunStatus, AiAssistRunView, AiProviderKind, AiStatusResult, DocumentExportResult,
     DocumentImportResult, DocumentRemoveResult, InitializeResult, PROTOCOL_VERSION, QaRunResult,
     RpcErrorCode, RpcNotification, RpcRequest, SegmentConfirmResult, SegmentListResult,
-    SegmentUpdateResult, TmLookupResult, methods,
+    SegmentUpdateResult, SegmentUpdateSourceResult, TmLookupResult, methods,
 };
 
 fn fixture_docx() -> PathBuf {
@@ -390,6 +390,125 @@ fn vertical_slice_docx_roundtrip() {
             }),
         ),
         RpcErrorCode::ExportBlocked
+    );
+}
+
+#[test]
+fn segment_source_editing_guards_and_honest_demotion() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let mut engine = Engine::open(&workspace.path().join("data")).expect("open engine");
+    let project: tl_domain::Project = call(
+        &mut engine,
+        methods::PROJECT_CREATE,
+        json!({"name": "Source", "sourceLocale": "en-US", "targetLocale": "zh-CN"}),
+    );
+    let imported: DocumentImportResult = call(
+        &mut engine,
+        methods::DOCUMENT_IMPORT,
+        json!({"projectId": project.id, "sourcePath": fixture_docx().display().to_string()}),
+    );
+    let listed: SegmentListResult = call(
+        &mut engine,
+        methods::SEGMENT_LIST,
+        json!({"documentId": imported.document.id}),
+    );
+    let first = listed.segments[0].clone();
+
+    // Rewrite the source: revision bumps, state is untouched for an
+    // unconfirmed row, and the stored source hash follows the new text.
+    let rewritten: SegmentUpdateSourceResult = call(
+        &mut engine,
+        methods::SEGMENT_UPDATE_SOURCE,
+        json!({
+            "segmentId": first.id,
+            "sourceText": "Corrected source sentence.",
+            "baseRevision": first.revision,
+        }),
+    );
+    assert_eq!(rewritten.segment.source_text, "Corrected source sentence.");
+    assert_eq!(rewritten.segment.revision, first.revision + 1);
+    assert_eq!(rewritten.segment.state, first.state);
+    assert_ne!(rewritten.segment.source_hash, first.source_hash);
+
+    // Stale revision conflicts, exactly like segment.update.
+    assert_eq!(
+        call_err(
+            &mut engine,
+            methods::SEGMENT_UPDATE_SOURCE,
+            json!({
+                "segmentId": first.id,
+                "sourceText": "Stale write.",
+                "baseRevision": first.revision,
+            }),
+        ),
+        RpcErrorCode::Conflict
+    );
+
+    // An empty source is meaningless and refused.
+    assert_eq!(
+        call_err(
+            &mut engine,
+            methods::SEGMENT_UPDATE_SOURCE,
+            json!({
+                "segmentId": first.id,
+                "sourceText": "   ",
+                "baseRevision": rewritten.segment.revision,
+            }),
+        ),
+        RpcErrorCode::InvalidParams
+    );
+
+    // Confirm the row, then rewrite the source again: the confirmation
+    // covered the old source, so the segment honestly returns to draft.
+    let updated: SegmentUpdateResult = call(
+        &mut engine,
+        methods::SEGMENT_UPDATE,
+        json!({
+            "segmentId": first.id,
+            "targetText": "修正后的译文。",
+            "baseRevision": rewritten.segment.revision,
+        }),
+    );
+    let confirmed: SegmentConfirmResult = call(
+        &mut engine,
+        methods::SEGMENT_CONFIRM,
+        json!({"segmentId": first.id, "baseRevision": updated.segment.revision}),
+    );
+    assert_eq!(confirmed.segment.state, tl_domain::SegmentState::Confirmed);
+    let demoted: SegmentUpdateSourceResult = call(
+        &mut engine,
+        methods::SEGMENT_UPDATE_SOURCE,
+        json!({
+            "segmentId": first.id,
+            "sourceText": "Corrected source sentence, again.",
+            "baseRevision": confirmed.segment.revision,
+        }),
+    );
+    assert_eq!(demoted.segment.state, tl_domain::SegmentState::Draft);
+    // The target text belongs to the translator; the rewrite keeps it.
+    assert_eq!(demoted.segment.target_text, "修正后的译文。");
+
+    // A locked row refuses the rewrite.
+    let locked: tl_protocol::SegmentLockResult = call(
+        &mut engine,
+        methods::SEGMENT_LOCK,
+        json!({
+            "segmentId": first.id,
+            "locked": true,
+            "baseRevision": demoted.segment.revision,
+        }),
+    );
+    assert_eq!(
+        call_err(
+            &mut engine,
+            methods::SEGMENT_UPDATE_SOURCE,
+            json!({
+                "segmentId": first.id,
+                "sourceText": "Locked write.",
+                "baseRevision": locked.segment.revision,
+            }),
+        ),
+        RpcErrorCode::Conflict
     );
 }
 

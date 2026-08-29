@@ -10,6 +10,7 @@ import type {
   MenuCommand,
   MenuContext,
   NativeScheme,
+  SegmentMenuContext,
   TitlebarOverlayColors,
 } from "../shared/desktop-api.js";
 
@@ -30,6 +31,7 @@ const CHANNELS = {
   menuCommand: "tl:menu:command",
   menuContext: "tl:menu:context",
   menuPopup: "tl:menu:popup",
+  segmentMenuPopup: "tl:menu:segment-popup",
   nativeScheme: "tl:window:native-scheme",
   titlebarOverlay: "tl:window:titlebar-overlay",
 } as const;
@@ -131,6 +133,18 @@ const api: DesktopApi = {
     return electron.ipcRenderer.invoke(
       CHANNELS.menuPopup,
       menuId,
+      x,
+      y,
+    ) as Promise<void>;
+  },
+  popupSegmentMenu(
+    context: SegmentMenuContext,
+    x: number,
+    y: number,
+  ): Promise<void> {
+    return electron.ipcRenderer.invoke(
+      CHANNELS.segmentMenuPopup,
+      context,
       x,
       y,
     ) as Promise<void>;

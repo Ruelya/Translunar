@@ -21,6 +21,7 @@ import type { BadgeTone } from "@translunar/ui";
 
 import { useAiStatus } from "../lib/ai-status.js";
 import { callEngine, describeError, isAiNotConfigured } from "../lib/engine.js";
+import { HarnessPanel } from "./HarnessPanel.js";
 
 export interface AgentPanelProps {
   documentId: string | null;
@@ -116,6 +117,9 @@ export function AgentPanel({
   filteredSegmentIds,
 }: AgentPanelProps) {
   const { configured, profiles, defaultProfileId } = useAiStatus();
+  // Two distinct products under one dock section (docs/agent-harness.md):
+  // the segment-batch MT pipeline, and the whole-document tool-loop agent.
+  const [surface, setSurface] = useState<"batch" | "harness">("batch");
   const [instruction, setInstruction] = useState("");
   const [approvalMode, setApprovalMode] = useState<AgentApprovalMode>("manual");
   const [profileId, setProfileId] = useState("");
@@ -381,280 +385,342 @@ export function AgentPanel({
       }
     >
       <div className="dock-stack">
-        {!configured ? (
-          <div className="honest-note" role="note">
-            未配置 AI 供应商
-          </div>
-        ) : null}
         <div
           className="agent-modes"
           role="tablist"
-          aria-label="审批模式"
-          data-testid="agent-modes"
+          aria-label="Agent 形态"
+          data-testid="agent-surfaces"
         >
-          {(Object.keys(MODE_LABEL) as AgentApprovalMode[]).map((mode) => (
-            <button
-              key={mode}
-              type="button"
-              role="tab"
-              aria-selected={approvalMode === mode}
-              data-active={approvalMode === mode}
-              disabled={running || starting}
-              onClick={() => setApprovalMode(mode)}
-            >
-              {MODE_LABEL[mode]}
-            </button>
-          ))}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={surface === "batch"}
+            data-active={surface === "batch"}
+            onClick={() => setSurface("batch")}
+          >
+            批量预翻（MT）
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={surface === "harness"}
+            data-active={surface === "harness"}
+            onClick={() => setSurface("harness")}
+          >
+            全文智能体
+          </button>
         </div>
-        {approvalMode === "turbo" ? (
-          <div className="honest-note" role="note">
-            {MODE_NOTE.turbo}
-          </div>
+        {surface === "harness" ? (
+          <HarnessPanel
+            documentId={documentId}
+            onCompleted={onCompleted}
+            onStatusMessage={onStatusMessage}
+            onJumpToSegment={onJumpToSegment}
+          />
         ) : (
-          <p className="agent-modes__note">{MODE_NOTE[approvalMode]}</p>
-        )}
-        {profiles.length > 1 ? (
-          <SelectField
-            label="模型"
-            value={profileId || (defaultProfileId ?? "")}
-            onChange={(event) => setProfileId(event.target.value)}
-          >
-            {profiles.map((profile) => (
-              <option key={profile.profileId} value={profile.profileId}>
-                {profile.label}
-              </option>
-            ))}
-          </SelectField>
-        ) : null}
-        <SelectField
-          label="作用域"
-          value={scope}
-          onChange={(event) =>
-            setScope(event.target.value === "filtered" ? "filtered" : "all")
-          }
-        >
-          <option value="all">全部未译句段</option>
-          <option value="filtered">
-            当前筛选可见句段（{filteredSegmentIds.length}）
-          </option>
-        </SelectField>
-        <TextAreaField
-          label="任务指令（可选）"
-          value={instruction}
-          onChange={(event) => setInstruction(event.target.value)}
-        />
-        <TextField
-          label="句段上限（默认 50）"
-          value={maxSegmentsText}
-          onChange={(event) => setMaxSegmentsText(event.target.value)}
-          inputMode="numeric"
-        />
-        <div className="tl-toolbar">
-          <Button
-            variant="primary"
-            disabled={!documentId || !configured || starting || running}
-            onClick={() => void start()}
-          >
-            {running ? "运行中…" : starting ? "启动中…" : "创建任务单并运行"}
-          </Button>
-          {running ? (
-            <Button variant="outline" onClick={() => void cancel()}>
-              {run?.cancelRequested ? "正在取消…" : "取消运行"}
-            </Button>
-          ) : null}
-        </div>
-        {error ? (
-          <div className="honest-note" data-tone="danger" role="alert">
-            {error}
-          </div>
-        ) : null}
-        {run ? (
-          <div className="agent-progress" data-testid="agent-progress">
-            <Meter
-              ratio={
-                run.plannedSegments > 0
-                  ? run.processedSegments / run.plannedSegments
-                  : 0
-              }
-              label={`已处理 ${run.processedSegments} / ${run.plannedSegments}`}
-            />
-            <span className="agent-progress__text">
-              已处理 {run.processedSegments} / {run.plannedSegments}
-            </span>
-            <Badge tone="neutral">{MODE_LABEL[run.approvalMode]}</Badge>
-            <span className="agent-progress__model">{run.model}</span>
-          </div>
-        ) : null}
-        {run ? (
-          <div className="agent-run-summary" data-testid="agent-run-summary">
-            <span>计划 {run.plannedSegments}</span>
-            {run.eligibleSegments !== run.plannedSegments ? (
-              <span>范围 {run.eligibleSegments}</span>
+          <>
+            {!configured ? (
+              <div className="honest-note" role="note">
+                未配置 AI 供应商
+              </div>
             ) : null}
-            <span>TM {run.tmApplied}</span>
-            <span>AI 草稿 {run.aiDrafted}</span>
-            {run.approvalMode === "manual" ? (
-              <span>待审 {pendingProposals.length}</span>
+            <p className="agent-modes__note">
+              批量预翻：TM 精确命中直接落格，未命中句段按段扇出给模型起草 ——传统
+              MT 心智，适合大批量粗翻。
+            </p>
+            <div
+              className="agent-modes"
+              role="tablist"
+              aria-label="审批模式"
+              data-testid="agent-modes"
+            >
+              {(Object.keys(MODE_LABEL) as AgentApprovalMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  role="tab"
+                  aria-selected={approvalMode === mode}
+                  data-active={approvalMode === mode}
+                  disabled={running || starting}
+                  onClick={() => setApprovalMode(mode)}
+                >
+                  {MODE_LABEL[mode]}
+                </button>
+              ))}
+            </div>
+            {approvalMode === "turbo" ? (
+              <div className="honest-note" role="note">
+                {MODE_NOTE.turbo}
+              </div>
+            ) : (
+              <p className="agent-modes__note">{MODE_NOTE[approvalMode]}</p>
+            )}
+            {profiles.length > 1 ? (
+              <SelectField
+                label="模型"
+                value={profileId || (defaultProfileId ?? "")}
+                onChange={(event) => setProfileId(event.target.value)}
+              >
+                {profiles.map((profile) => (
+                  <option key={profile.profileId} value={profile.profileId}>
+                    {profile.label}
+                  </option>
+                ))}
+              </SelectField>
             ) : null}
-            {run.approvalMode === "turbo" ? (
-              <span>自动确认 {run.autoConfirmed}</span>
-            ) : null}
-            {run.skippedSegments > 0 ? (
-              <span>跳过 {run.skippedSegments}</span>
-            ) : null}
-            <span>失败 {run.failedSegments}</span>
-            <span>QA 未解决 {run.openQaIssues}</span>
-          </div>
-        ) : null}
-        {run && run.status !== "running" && run.failedSegmentIds.length > 0 ? (
-          <div className="tl-toolbar">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={starting}
-              onClick={() =>
-                void start({
-                  segmentIds: run.failedSegmentIds,
-                  approvalMode: run.approvalMode,
-                  profileId: run.profileId,
-                })
+            <SelectField
+              label="作用域"
+              value={scope}
+              onChange={(event) =>
+                setScope(event.target.value === "filtered" ? "filtered" : "all")
               }
             >
-              重跑失败句段（{run.failedSegmentIds.length}）
-            </Button>
-          </div>
-        ) : null}
-        {run && run.proposals.length > 0 ? (
-          <div className="agent-proposals" data-testid="agent-proposals">
-            <div className="agent-proposals__head">
-              <span>待审候选 {pendingProposals.length}</span>
-              {pendingProposals.length > 0 ? (
-                <>
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    disabled={reviewBusy}
-                    onClick={() =>
-                      void review(
-                        pendingProposals.map((proposal) => proposal.segmentId),
-                        "apply",
-                      )
-                    }
-                  >
-                    全部批准
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={reviewBusy}
-                    onClick={() =>
-                      void review(
-                        pendingProposals.map((proposal) => proposal.segmentId),
-                        "reject",
-                      )
-                    }
-                  >
-                    全部拒绝
-                  </Button>
-                </>
-              ) : null}
-            </div>
-            {run.proposals.map((proposal) => (
-              <div
-                key={proposal.segmentId}
-                className="agent-proposal"
-                data-testid="agent-proposal"
-              >
-                <div className="agent-proposal__meta">
-                  <Badge tone={PROPOSAL_STATUS_TONE[proposal.status]}>
-                    {PROPOSAL_STATUS_LABEL[proposal.status]}
-                  </Badge>
-                  <span className="agent-proposal__model">
-                    {proposal.model} · {proposal.elapsedMs}ms
-                  </span>
-                  <button
-                    type="button"
-                    className="agent-step__jump"
-                    onClick={() => onJumpToSegment(proposal.segmentId)}
-                  >
-                    定位句段
-                  </button>
-                </div>
-                <p className="agent-proposal__source">{proposal.sourceText}</p>
-                <p className="agent-proposal__draft">{proposal.draftTarget}</p>
-                {proposal.note ? (
-                  <div className="honest-note" data-tone="danger">
-                    {proposal.note}
-                  </div>
-                ) : null}
-                {proposal.status === "pending" ? (
-                  <div className="tl-toolbar">
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      disabled={reviewBusy}
-                      onClick={() => void review([proposal.segmentId], "apply")}
-                    >
-                      批准
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={reviewBusy}
-                      onClick={() =>
-                        void review([proposal.segmentId], "reject")
-                      }
-                    >
-                      拒绝
-                    </Button>
-                  </div>
-                ) : null}
-              </div>
-            ))}
-          </div>
-        ) : null}
-        {run?.status === "awaitingReview" ? (
-          <div className="agent-gate" data-testid="agent-human-gate">
+              <option value="all">全部未译句段</option>
+              <option value="filtered">
+                当前筛选可见句段（{filteredSegmentIds.length}）
+              </option>
+            </SelectField>
+            <TextAreaField
+              label="任务指令（可选）"
+              value={instruction}
+              onChange={(event) => setInstruction(event.target.value)}
+            />
+            <TextField
+              label="句段上限（默认 50）"
+              value={maxSegmentsText}
+              onChange={(event) => setMaxSegmentsText(event.target.value)}
+              inputMode="numeric"
+            />
             <div className="tl-toolbar">
-              <Button size="sm" variant="primary" onClick={onCompleted}>
-                去工作台查看草稿
+              <Button
+                variant="primary"
+                disabled={!documentId || !configured || starting || running}
+                onClick={() => void start()}
+              >
+                {running
+                  ? "运行中…"
+                  : starting
+                    ? "启动中…"
+                    : "创建任务单并运行"}
               </Button>
-              {run.openQaIssues > 0 ? (
-                <Button size="sm" variant="outline" onClick={onGoQa}>
-                  查看 QA 修复项
+              {running ? (
+                <Button variant="outline" onClick={() => void cancel()}>
+                  {run?.cancelRequested ? "正在取消…" : "取消运行"}
                 </Button>
               ) : null}
-              <Button size="sm" variant="outline" onClick={onGoExport}>
-                去导出…
-              </Button>
             </div>
-          </div>
-        ) : null}
-        {!run && !error ? <EmptyState title="尚未运行" /> : null}
-        {run && run.steps.length > 0 ? (
-          <div className="dock-stack">
-            {run.steps.map((step) => (
-              <div key={`${step.index}-${step.kind}`} className="agent-step">
-                <div className="agent-step__meta">
-                  <Badge tone={STEP_TONE[step.status]}>
-                    {STEP_LABEL[step.kind]}
-                  </Badge>
-                  <span>#{step.index}</span>
-                  {step.segmentId ? (
-                    <button
-                      type="button"
-                      className="agent-step__jump"
-                      onClick={() => onJumpToSegment(step.segmentId!)}
-                    >
-                      定位句段
-                    </button>
+            {error ? (
+              <div className="honest-note" data-tone="danger" role="alert">
+                {error}
+              </div>
+            ) : null}
+            {run ? (
+              <div className="agent-progress" data-testid="agent-progress">
+                <Meter
+                  ratio={
+                    run.plannedSegments > 0
+                      ? run.processedSegments / run.plannedSegments
+                      : 0
+                  }
+                  label={`已处理 ${run.processedSegments} / ${run.plannedSegments}`}
+                />
+                <span className="agent-progress__text">
+                  已处理 {run.processedSegments} / {run.plannedSegments}
+                </span>
+                <Badge tone="neutral">{MODE_LABEL[run.approvalMode]}</Badge>
+                <span className="agent-progress__model">{run.model}</span>
+              </div>
+            ) : null}
+            {run ? (
+              <div
+                className="agent-run-summary"
+                data-testid="agent-run-summary"
+              >
+                <span>计划 {run.plannedSegments}</span>
+                {run.eligibleSegments !== run.plannedSegments ? (
+                  <span>范围 {run.eligibleSegments}</span>
+                ) : null}
+                <span>TM {run.tmApplied}</span>
+                <span>AI 草稿 {run.aiDrafted}</span>
+                {run.approvalMode === "manual" ? (
+                  <span>待审 {pendingProposals.length}</span>
+                ) : null}
+                {run.approvalMode === "turbo" ? (
+                  <span>自动确认 {run.autoConfirmed}</span>
+                ) : null}
+                {run.skippedSegments > 0 ? (
+                  <span>跳过 {run.skippedSegments}</span>
+                ) : null}
+                <span>失败 {run.failedSegments}</span>
+                <span>QA 未解决 {run.openQaIssues}</span>
+              </div>
+            ) : null}
+            {run &&
+            run.status !== "running" &&
+            run.failedSegmentIds.length > 0 ? (
+              <div className="tl-toolbar">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={starting}
+                  onClick={() =>
+                    void start({
+                      segmentIds: run.failedSegmentIds,
+                      approvalMode: run.approvalMode,
+                      profileId: run.profileId,
+                    })
+                  }
+                >
+                  重跑失败句段（{run.failedSegmentIds.length}）
+                </Button>
+              </div>
+            ) : null}
+            {run && run.proposals.length > 0 ? (
+              <div className="agent-proposals" data-testid="agent-proposals">
+                <div className="agent-proposals__head">
+                  <span>待审候选 {pendingProposals.length}</span>
+                  {pendingProposals.length > 0 ? (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        disabled={reviewBusy}
+                        onClick={() =>
+                          void review(
+                            pendingProposals.map(
+                              (proposal) => proposal.segmentId,
+                            ),
+                            "apply",
+                          )
+                        }
+                      >
+                        全部批准
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={reviewBusy}
+                        onClick={() =>
+                          void review(
+                            pendingProposals.map(
+                              (proposal) => proposal.segmentId,
+                            ),
+                            "reject",
+                          )
+                        }
+                      >
+                        全部拒绝
+                      </Button>
+                    </>
                   ) : null}
                 </div>
-                <p className="agent-step__detail">{step.detail}</p>
+                {run.proposals.map((proposal) => (
+                  <div
+                    key={proposal.segmentId}
+                    className="agent-proposal"
+                    data-testid="agent-proposal"
+                  >
+                    <div className="agent-proposal__meta">
+                      <Badge tone={PROPOSAL_STATUS_TONE[proposal.status]}>
+                        {PROPOSAL_STATUS_LABEL[proposal.status]}
+                      </Badge>
+                      <span className="agent-proposal__model">
+                        {proposal.model} · {proposal.elapsedMs}ms
+                      </span>
+                      <button
+                        type="button"
+                        className="agent-step__jump"
+                        onClick={() => onJumpToSegment(proposal.segmentId)}
+                      >
+                        定位句段
+                      </button>
+                    </div>
+                    <p className="agent-proposal__source">
+                      {proposal.sourceText}
+                    </p>
+                    <p className="agent-proposal__draft">
+                      {proposal.draftTarget}
+                    </p>
+                    {proposal.note ? (
+                      <div className="honest-note" data-tone="danger">
+                        {proposal.note}
+                      </div>
+                    ) : null}
+                    {proposal.status === "pending" ? (
+                      <div className="tl-toolbar">
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          disabled={reviewBusy}
+                          onClick={() =>
+                            void review([proposal.segmentId], "apply")
+                          }
+                        >
+                          批准
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={reviewBusy}
+                          onClick={() =>
+                            void review([proposal.segmentId], "reject")
+                          }
+                        >
+                          拒绝
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        ) : null}
+            ) : null}
+            {run?.status === "awaitingReview" ? (
+              <div className="agent-gate" data-testid="agent-human-gate">
+                <div className="tl-toolbar">
+                  <Button size="sm" variant="primary" onClick={onCompleted}>
+                    去工作台查看草稿
+                  </Button>
+                  {run.openQaIssues > 0 ? (
+                    <Button size="sm" variant="outline" onClick={onGoQa}>
+                      查看 QA 修复项
+                    </Button>
+                  ) : null}
+                  <Button size="sm" variant="outline" onClick={onGoExport}>
+                    去导出…
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+            {!run && !error ? <EmptyState title="尚未运行" /> : null}
+            {run && run.steps.length > 0 ? (
+              <div className="dock-stack">
+                {run.steps.map((step) => (
+                  <div
+                    key={`${step.index}-${step.kind}`}
+                    className="agent-step"
+                  >
+                    <div className="agent-step__meta">
+                      <Badge tone={STEP_TONE[step.status]}>
+                        {STEP_LABEL[step.kind]}
+                      </Badge>
+                      <span>#{step.index}</span>
+                      {step.segmentId ? (
+                        <button
+                          type="button"
+                          className="agent-step__jump"
+                          onClick={() => onJumpToSegment(step.segmentId!)}
+                        >
+                          定位句段
+                        </button>
+                      ) : null}
+                    </div>
+                    <p className="agent-step__detail">{step.detail}</p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </>
+        )}
       </div>
     </Panel>
   );

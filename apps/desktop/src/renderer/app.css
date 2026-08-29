@@ -2487,6 +2487,17 @@ button.app-statusbar__jump:hover {
 }
 
 /* Approval tiers share the underline-tab grammar of the preview tabs. */
+/* Harness: the web-access opt-in reads as a deliberate switch, not a
+   buried checkbox. */
+.harness-web-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  font-size: var(--tl-text-sm);
+  color: var(--tl-color-text-muted);
+  cursor: pointer;
+}
+
 .agent-modes {
   display: flex;
   gap: var(--tl-space-1);

@@ -35,12 +35,13 @@
   --tl-color-scrim: rgba(10, 10, 10, 0.4);
   --tl-font-ui:
     "Nimbus Sans", "Helvetica Neue", Helvetica, "PingFang SC",
-    "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif;
+    "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC",
+    "WenQuanYi Micro Hei", sans-serif;
   --tl-font-mono: "Cascadia Mono", ui-monospace, monospace;
-  --tl-text-xs: 10px;
-  --tl-text-sm: 11px;
-  --tl-text-md: 12px;
-  --tl-text-lg: 14px;
+  --tl-text-xs: 12px;
+  --tl-text-sm: 13px;
+  --tl-text-md: 14px;
+  --tl-text-lg: 15px;
   --tl-text-xl: 18px;
   --tl-radius-sm: 0px;
   --tl-radius-md: 0px;

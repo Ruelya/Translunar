@@ -34,14 +34,14 @@
   --tl-status-info-soft: rgba(23, 98, 122, 0.14);
   --tl-color-scrim: rgba(60, 74, 62, 0.3);
   --tl-font-ui:
-    "JetBrains Mono", "Cascadia Mono", "WenQuanYi Micro Hei Mono", ui-monospace,
-    monospace;
+    "JetBrains Mono", "Cascadia Mono", "Microsoft YaHei UI", "Microsoft YaHei",
+    "WenQuanYi Micro Hei Mono", ui-monospace, monospace;
   --tl-font-mono:
     "JetBrains Mono", "WenQuanYi Micro Hei Mono", ui-monospace, monospace;
-  --tl-text-xs: 10px;
-  --tl-text-sm: 11.5px;
-  --tl-text-md: 12.5px;
-  --tl-text-lg: 14px;
+  --tl-text-xs: 12px;
+  --tl-text-sm: 13px;
+  --tl-text-md: 14px;
+  --tl-text-lg: 15px;
   --tl-text-xl: 18px;
   --tl-radius-sm: 0px;
   --tl-radius-md: 0px;

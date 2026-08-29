@@ -34,13 +34,13 @@
   --tl-status-info-soft: #e4ecf4;
   --tl-color-scrim: rgba(22, 24, 29, 0.3);
   --tl-font-ui:
-    "Geist", "PingFang SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei",
-    system-ui, sans-serif;
+    "Geist", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Noto Sans CJK SC", "WenQuanYi Micro Hei", system-ui, sans-serif;
   --tl-font-mono: "Geist Mono", ui-monospace, monospace;
-  --tl-text-xs: 10px;
-  --tl-text-sm: 11px;
-  --tl-text-md: 12.5px;
-  --tl-text-lg: 14px;
+  --tl-text-xs: 12px;
+  --tl-text-sm: 13px;
+  --tl-text-md: 14px;
+  --tl-text-lg: 15px;
   --tl-text-xl: 18px;
   --tl-radius-sm: 3px;
   --tl-radius-md: 4px;

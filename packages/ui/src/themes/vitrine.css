@@ -34,12 +34,12 @@
   --tl-status-info-soft: rgba(47, 110, 168, 0.14);
   --tl-color-scrim: rgba(150, 184, 200, 0.34);
   --tl-font-ui:
-    "Inter", "PingFang SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei",
-    sans-serif;
+    "Inter", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif;
   --tl-font-mono: "JetBrains Mono", ui-monospace, monospace;
-  --tl-text-xs: 10.5px;
-  --tl-text-sm: 12px;
-  --tl-text-md: 13px;
+  --tl-text-xs: 12px;
+  --tl-text-sm: 13px;
+  --tl-text-md: 14px;
   --tl-text-lg: 15px;
   --tl-text-xl: 24px;
   --tl-radius-sm: 8px;

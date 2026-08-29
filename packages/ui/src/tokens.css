@@ -77,17 +77,22 @@
   --tl-chip-active-bg: var(--tl-color-surface-raised);
   --tl-chip-active-line: var(--tl-status-ok);
 
-  /* Typography: bundled IBM Plex (fonts.css) + system CJK fallbacks. */
+  /*
+   * Typography: bundled IBM Plex (fonts.css) + system CJK fallbacks.
+   * Windows notes: "Microsoft YaHei UI" leads the CJK fallbacks (missing
+   * it drops zh-CN text to SimSun — jagged and cheap), and no step sits
+   * below 12px, where DirectWrite rendering of CJK degrades sharply.
+   */
   --tl-font-ui:
-    "IBM Plex Sans", "PingFang SC", "Microsoft YaHei", "Noto Sans SC",
-    system-ui, sans-serif;
+    "IBM Plex Sans", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Noto Sans SC", system-ui, sans-serif;
   --tl-font-mono:
     "IBM Plex Mono", ui-monospace, "SFMono-Regular", "Consolas", monospace;
-  --tl-text-xs: 11px;
-  --tl-text-sm: 12px;
-  --tl-text-md: 13px;
-  --tl-text-lg: 15px;
-  --tl-text-xl: 18px;
+  --tl-text-xs: 12px;
+  --tl-text-sm: 13px;
+  --tl-text-md: 14px;
+  --tl-text-lg: 16px;
+  --tl-text-xl: 20px;
 
   /* Geometry: instruments are squared-off. */
   --tl-radius-sm: 2px;

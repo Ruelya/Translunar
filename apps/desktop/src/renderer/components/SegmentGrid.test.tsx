@@ -128,6 +128,71 @@ describe("SegmentGrid", () => {
     expect(afterSwitch.at(-1)).toBe("");
   });
 
+  it("edits the source on double-click and commits with Ctrl+Enter", async () => {
+    const onUpdateSource = vi.fn();
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "Helo world.", "你好。")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onUpdateSource={onUpdateSource}
+      />,
+    );
+    await userEvent.dblClick(screen.getByText("Helo world."));
+    const editor = screen.getByLabelText("句段 1 源文");
+    expect(editor).toHaveValue("Helo world.");
+    await userEvent.clear(editor);
+    await userEvent.type(editor, "Hello world.");
+    fireEvent.keyDown(editor, { key: "Enter", ctrlKey: true });
+    expect(onUpdateSource).toHaveBeenCalledTimes(1);
+    const [edited, text] = onUpdateSource.mock.calls[0] as [Segment, string];
+    expect(edited.id).toBe("s1");
+    expect(text).toBe("Hello world.");
+    // The editor closed and the cell shows the (still-propped) source text.
+    expect(screen.queryByLabelText("句段 1 源文")).not.toBeInTheDocument();
+  });
+
+  it("cancels a source edit with Escape without writing", async () => {
+    const onUpdateSource = vi.fn();
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "Hello.", "你好。")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onUpdateSource={onUpdateSource}
+      />,
+    );
+    await userEvent.dblClick(screen.getByText("Hello."));
+    const editor = screen.getByLabelText("句段 1 源文");
+    await userEvent.type(editor, " typed");
+    fireEvent.keyDown(editor, { key: "Escape" });
+    expect(onUpdateSource).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("句段 1 源文")).not.toBeInTheDocument();
+  });
+
+  it("never opens the source editor on a locked row", async () => {
+    const locked = { ...segment("s1", 0, "Hello.", "你好。"), locked: true };
+    render(
+      <SegmentGrid
+        segments={[locked]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onUpdateSource={vi.fn()}
+      />,
+    );
+    await userEvent.dblClick(screen.getByText("Hello."));
+    expect(screen.queryByLabelText("句段 1 源文")).not.toBeInTheDocument();
+  });
+
   it("renders no per-row save/confirm buttons in the active row", () => {
     render(
       <SegmentGrid

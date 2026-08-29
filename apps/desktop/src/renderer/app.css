@@ -1801,6 +1801,31 @@ button.app-statusbar__jump:hover {
   field-sizing: content;
 }
 
+/* Source editing shares the same geometry-stable inline box; a dashed
+   underline marks that this deliberate edit rewrites the imported source. */
+.segment-grid__source-editor {
+  display: flex;
+  flex-direction: column;
+}
+
+.segment-grid__source-editor textarea {
+  display: block;
+  width: 100%;
+  font: inherit;
+  line-height: 1.5;
+  border: none;
+  border-bottom: 1px dashed var(--tl-color-border-strong);
+  outline: none;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  margin: 0;
+  resize: none;
+  overflow: hidden;
+  field-sizing: content;
+}
+
 /* Language tags in the column headers: lowercase BCP-47, deliberately
    quieter than the uppercase column titles. */
 .segment-grid__locale {

@@ -44,6 +44,7 @@ pub mod methods {
     pub const DOCUMENT_EXPORT: &str = "document.export";
     pub const SEGMENT_LIST: &str = "segment.list";
     pub const SEGMENT_UPDATE: &str = "segment.update";
+    pub const SEGMENT_UPDATE_SOURCE: &str = "segment.updateSource";
     pub const SEGMENT_REPLACE: &str = "segment.replace";
     pub const SEGMENT_CONFIRM: &str = "segment.confirm";
     pub const SEGMENT_LOCK: &str = "segment.lock";
@@ -138,6 +139,8 @@ pub struct RpcMethodCatalog {
     pub segment_list: MethodContract<SegmentListParams, SegmentListResult>,
     #[serde(rename = "segment.update")]
     pub segment_update: MethodContract<SegmentUpdateParams, SegmentUpdateResult>,
+    #[serde(rename = "segment.updateSource")]
+    pub segment_update_source: MethodContract<SegmentUpdateSourceParams, SegmentUpdateSourceResult>,
     #[serde(rename = "segment.replace")]
     pub segment_replace: MethodContract<SegmentReplaceParams, SegmentReplaceResult>,
     #[serde(rename = "segment.confirm")]
@@ -286,6 +289,7 @@ mod tests {
             methods::DOCUMENT_EXPORT,
             methods::SEGMENT_LIST,
             methods::SEGMENT_UPDATE,
+            methods::SEGMENT_UPDATE_SOURCE,
             methods::SEGMENT_REPLACE,
             methods::SEGMENT_CONFIRM,
             methods::SEGMENT_LOCK,

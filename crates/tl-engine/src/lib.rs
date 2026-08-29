@@ -52,8 +52,8 @@ use tl_protocol::{
     ProjectListResult, ProjectUpdateParams, QaRunParams, RpcError, RpcErrorCode, RpcNotification,
     RpcRequest, RpcResponse, SegmentConfirmParams, SegmentConfirmResult, SegmentListParams,
     SegmentListResult, SegmentLockParams, SegmentLockResult, SegmentReplaceParams,
-    SegmentReplaceResult, SegmentUpdateParams, SegmentUpdateResult, ShutdownResult, methods,
-    notifications,
+    SegmentReplaceResult, SegmentUpdateParams, SegmentUpdateResult, SegmentUpdateSourceParams,
+    SegmentUpdateSourceResult, ShutdownResult, methods, notifications,
 };
 use tl_segmentation::{SegmentationMode, SrxRules};
 
@@ -366,6 +366,7 @@ impl Engine {
             methods::DOCUMENT_EXPORT => to_value(self.document_export(parse(params)?)?),
             methods::SEGMENT_LIST => to_value(self.segment_list(parse(params)?)?),
             methods::SEGMENT_UPDATE => to_value(self.segment_update(parse(params)?)?),
+            methods::SEGMENT_UPDATE_SOURCE => to_value(self.segment_update_source(parse(params)?)?),
             methods::SEGMENT_REPLACE => to_value(self.segment_replace(parse(params)?)?),
             methods::SEGMENT_CONFIRM => to_value(self.segment_confirm(parse(params)?)?),
             methods::SEGMENT_LOCK => to_value(self.segment_lock(parse(params)?)?),
@@ -1130,6 +1131,76 @@ impl Engine {
             ..Default::default()
         })?;
         Ok(SegmentUpdateResult { segment })
+    }
+
+    /// Rewrite the source text of one segment. Same fetch-mutate-persist
+    /// shape and guards as `segment.update` (stale revision conflicts,
+    /// locked conflicts). The source must not become empty. A confirmed
+    /// segment whose source changed honestly returns to `draft` — the
+    /// confirmation covered the old source — while its TM entry is left as
+    /// it was (mirroring `segment.replace`) and the target-origin stamp is
+    /// kept: it still describes where the target came from.
+    fn segment_update_source(
+        &mut self,
+        params: SegmentUpdateSourceParams,
+    ) -> Result<SegmentUpdateSourceResult, EngineError> {
+        let now = now_ms();
+        let mut segment = self
+            .store
+            .segment(&params.segment_id)?
+            .ok_or_else(|| EngineError::NotFound(format!("segment {}", params.segment_id)))?;
+        if segment.revision != params.base_revision {
+            return Err(EngineError::Conflict(format!(
+                "segment revision moved to {}; refresh before editing",
+                segment.revision
+            )));
+        }
+        if segment.locked {
+            return Err(EngineError::Conflict(
+                "segment is locked; unlock it before editing".to_string(),
+            ));
+        }
+        if params.source_text.trim().is_empty() {
+            return Err(EngineError::InvalidParams(
+                "source text must not be empty".to_string(),
+            ));
+        }
+        let source_changed = segment.source_text != params.source_text;
+        segment.source_text = params.source_text;
+        if source_changed {
+            // source_hash indexes duplicate propagation and TM lookup, so it
+            // must always describe the current source; context_hash embeds
+            // the neighbouring sources, recomputed from the live window.
+            // (The neighbours' own context hashes are left untouched — no
+            // code path consumes them today, and rewriting them would bump
+            // revisions on rows the user never edited.)
+            let window_start = segment.ordinal.saturating_sub(1);
+            let window =
+                self.store
+                    .document_segments_page(&segment.document_id, window_start, Some(3))?;
+            let previous = window
+                .iter()
+                .find(|row| row.ordinal + 1 == segment.ordinal)
+                .map(|row| row.source_text.as_str());
+            let next = window
+                .iter()
+                .find(|row| row.ordinal == segment.ordinal + 1)
+                .map(|row| row.source_text.as_str());
+            let (source_hash, context_hash) =
+                tl_domain::segment_hashes(&segment.source_text, previous, next);
+            segment.source_hash = source_hash;
+            segment.context_hash = context_hash;
+            if segment.state == SegmentState::Confirmed {
+                segment.state = SegmentState::Draft;
+            }
+        }
+        segment.revision += 1;
+        segment.updated_at_ms = now;
+        self.store.apply(&StateDelta {
+            segments: vec![segment.clone()],
+            ..Default::default()
+        })?;
+        Ok(SegmentUpdateSourceResult { segment })
     }
 
     /// Document-wide search-and-replace over target text, in one SQLite

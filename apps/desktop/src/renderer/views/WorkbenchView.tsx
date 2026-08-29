@@ -1231,6 +1231,36 @@ export function WorkbenchView({
     [activeSegment, saveDraft],
   );
 
+  // 编辑源文 (double-click on the source cell, row menu, context menu):
+  // segment.updateSource with the same optimistic-concurrency shape as
+  // target writes. The engine owns every guard — stale revision, locked
+  // row, empty source, and the honest confirmed→draft demotion when the
+  // confirmation covered the old source.
+  const updateSourceText = useCallback(
+    (segment: Segment, sourceText: string): Promise<void> =>
+      enqueueSegmentWrite(async () => {
+        const latest = latestSegmentsRef.current.get(segment.id) ?? segment;
+        try {
+          const result = await callEngine("segment.updateSource", {
+            segmentId: segment.id,
+            sourceText,
+            baseRevision: latest.revision,
+          });
+          applySegments([result.segment]);
+          onStatusMessage(
+            result.segment.state === "draft" &&
+              latest.state === "confirmed"
+              ? `句段 #${segment.ordinal + 1} 源文已更新，确认状态回到草稿`
+              : `句段 #${segment.ordinal + 1} 源文已更新`,
+          );
+        } catch (error) {
+          onStatusMessage(`源文更新失败：${describeError(error)}`);
+          await reloadSegments();
+        }
+      }),
+    [enqueueSegmentWrite, applySegments, onStatusMessage, reloadSegments],
+  );
+
   // Row menu 复制源文: the source text becomes the draft via the same
   // segment.update path as typing (quiet save + a purpose-named message).
   const copySourceToTarget = useCallback(
@@ -3329,6 +3359,9 @@ export function WorkbenchView({
                   onCopySource={copySourceToTarget}
                   onClearTarget={clearTargetText}
                   onToggleLock={(segment) => void toggleLockSegment(segment)}
+                  onUpdateSource={(segment, text) =>
+                    void updateSourceText(segment, text)
+                  }
                   onCaretChange={setCaret}
                 />
               )}

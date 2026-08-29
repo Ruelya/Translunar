@@ -74,6 +74,13 @@ export interface SegmentGridHandle {
    * belongs to instead of conflicting after the lock.
    */
   flushDraft: () => void;
+  /**
+   * Open the source editor on the active row (menu/context-menu entry
+   * point; double-clicking the source cell does the same). Returns false
+   * when there is no active row, the row is locked, or source editing is
+   * not wired, so callers can report honestly.
+   */
+  editActiveSource: () => boolean;
 }
 
 export interface SegmentGridProps {
@@ -117,6 +124,13 @@ export interface SegmentGridProps {
    * (glyph in the status column, editor never mounts on a locked row).
    */
   onToggleLock?: (segment: Segment) => void;
+  /**
+   * Commits an edited source text through `segment.updateSource` (engine
+   * guards: stale revision, locked row, empty source). Wiring this enables
+   * the source editor: double-click on the source cell, 编辑源文 in the
+   * row menu, or `editActiveSource` on the handle.
+   */
+  onUpdateSource?: (segment: Segment, sourceText: string) => void;
   /**
    * Status-bar caret readout: reports the caret's line/column inside the
    * mounted target editor, and null whenever no editor is mounted. Editor
@@ -224,6 +238,65 @@ function caretPosition(value: string, index: number): EditorCaret {
     }
   }
   return { line, column: index - before.lastIndexOf("\n") };
+}
+
+interface SourceEditorProps {
+  segment: Segment;
+  /** Commit the edited text (unchanged or blank edits are dropped). */
+  onCommit: (segment: Segment, sourceText: string) => void;
+  /** Editing ended (committed or cancelled); the grid unmounts the editor. */
+  onClose: () => void;
+}
+
+/**
+ * Deliberate, explicit source editing — unlike the target editor there is
+ * no debounced autosave: Ctrl+Enter or leaving the field commits, Esc
+ * cancels without a write. Mounted per segment (keyed by the grid), so the
+ * value can never leak between rows.
+ */
+function SourceEditor({ segment, onCommit, onClose }: SourceEditorProps) {
+  const [value, setValue] = useState(() => segment.sourceText);
+  // Esc must discard: the blur that follows unmount would otherwise commit.
+  const cancelledRef = useRef(false);
+
+  const commit = useCallback(() => {
+    if (cancelledRef.current) {
+      return;
+    }
+    cancelledRef.current = true;
+    const next = value;
+    if (next.trim().length > 0 && next !== segment.sourceText) {
+      onCommit(segment, next);
+    }
+    onClose();
+  }, [value, segment, onCommit, onClose]);
+
+  return (
+    <div className="segment-grid__source-editor">
+      <textarea
+        aria-label={`句段 ${segment.ordinal + 1} 源文`}
+        value={value}
+        autoFocus
+        onChange={(event) => setValue(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) {
+            return;
+          }
+          if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+            event.preventDefault();
+            commit();
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            cancelledRef.current = true;
+            onClose();
+          }
+        }}
+      />
+    </div>
+  );
 }
 
 /** Imperative surface of the mounted target editor, owned per segment. */
@@ -530,6 +603,7 @@ export function SegmentGrid({
   onCopySource,
   onClearTarget,
   onToggleLock,
+  onUpdateSource,
   onCaretChange,
   autoSaveDelayMs = AUTO_SAVE_DELAY_MS,
   ref,
@@ -554,6 +628,8 @@ export function SegmentGrid({
   const [, setMeasureVersion] = useState(0);
   // Row whose ⋯ menu is open (right-click or the hover dots).
   const [menuSegmentId, setMenuSegmentId] = useState<string | null>(null);
+  // Row whose source cell is being edited (one at a time, like the target).
+  const [sourceEditingId, setSourceEditingId] = useState<string | null>(null);
 
   const activeSegment =
     segments.find((segment) => segment.id === activeSegmentId) ?? null;
@@ -562,6 +638,18 @@ export function SegmentGrid({
     pendingRowFocusRef.current = true;
     setEditing(false);
   }, []);
+
+  const beginSourceEdit = useCallback(
+    (segment: Segment): boolean => {
+      if (!onUpdateSource || segment.locked === true) {
+        return false;
+      }
+      onSelect(segment.id);
+      setSourceEditingId(segment.id);
+      return true;
+    },
+    [onUpdateSource, onSelect],
+  );
 
   useImperativeHandle(
     ref,
@@ -586,8 +674,12 @@ export function SegmentGrid({
         return false;
       },
       flushDraft: () => editorHandleRef.current?.flush(),
+      editActiveSource: () => {
+        const segment = segments.find((row) => row.id === activeSegmentId);
+        return segment ? beginSourceEdit(segment) : false;
+      },
     }),
-    [activeSegmentId],
+    [activeSegmentId, segments, beginSourceEdit],
   );
 
   // --- Roving focus ------------------------------------------------------
@@ -894,11 +986,27 @@ export function SegmentGrid({
                 }}
               >
                 <td className="segment-grid__ordinal">{segment.ordinal + 1}</td>
-                <td className="segment-grid__source">
-                  <TokenText
-                    text={segment.sourceText}
-                    dangerTokens={alert?.missing}
-                  />
+                <td
+                  className="segment-grid__source"
+                  onDoubleClick={
+                    onUpdateSource && !locked
+                      ? () => beginSourceEdit(segment)
+                      : undefined
+                  }
+                >
+                  {sourceEditingId === segment.id && onUpdateSource ? (
+                    <SourceEditor
+                      key={segment.id}
+                      segment={segment}
+                      onCommit={onUpdateSource}
+                      onClose={() => setSourceEditingId(null)}
+                    />
+                  ) : (
+                    <TokenText
+                      text={segment.sourceText}
+                      dangerTokens={alert?.missing}
+                    />
+                  )}
                 </td>
                 <td className="segment-grid__target">
                   {isEditing ? (
@@ -968,7 +1076,10 @@ export function SegmentGrid({
                         title={`TM 最佳匹配 ${activeMatch.score}%`}
                       />
                     ) : null}
-                    {onCopySource || onClearTarget || onToggleLock ? (
+                    {onCopySource ||
+                    onClearTarget ||
+                    onToggleLock ||
+                    onUpdateSource ? (
                       <span className="segment-grid__menu-wrap">
                         <button
                           type="button"
@@ -1017,6 +1128,21 @@ export function SegmentGrid({
                                 }}
                               >
                                 清空译文
+                              </button>
+                            ) : null}
+                            {onUpdateSource ? (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="segment-grid__menu-item"
+                                disabled={locked}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setMenuSegmentId(null);
+                                  beginSourceEdit(segment);
+                                }}
+                              >
+                                编辑源文
                               </button>
                             ) : null}
                             {onToggleLock ? (

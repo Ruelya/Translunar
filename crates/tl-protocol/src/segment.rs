@@ -51,6 +51,31 @@ pub struct SegmentUpdateResult {
     pub segment: Segment,
 }
 
+/// Parameters for `segment.updateSource`: rewrite the source text of one
+/// segment (imported text carrying an OCR error or a typo the translator
+/// must fix in place). Guards mirror `segment.update`: a stale
+/// `baseRevision` conflicts and a locked segment conflicts. The source
+/// must not become empty — a segment without source text has no meaning.
+/// Rewriting the source of a confirmed segment honestly returns it to
+/// `draft`: the confirmation covered the old source. Any TM entry written
+/// by an earlier confirm is left as it was (mirroring `segment.replace`),
+/// and the stored target-origin stamp is kept — it still describes where
+/// the target text came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentUpdateSourceParams {
+    pub segment_id: String,
+    pub source_text: String,
+    /// Optimistic concurrency: must match the segment's current revision.
+    pub base_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentUpdateSourceResult {
+    pub segment: Segment,
+}
+
 /// Parameters for `segment.replace`: one document-wide search-and-replace
 /// over target text. Matching is case-insensitive with per-character
 /// Unicode lowercase folding — the same semantics as the grid find box —

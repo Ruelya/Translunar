@@ -512,12 +512,15 @@ button.app-statusbar__jump:hover {
    far-right search. Items that do not fit fold into the trailing 更多
    menu — the ribbon never scrolls. */
 
+/* Ribbon spacing reads from one scale: space-2 inside a group, space-3
+   between groups, space-4 against the window edge — never ad-hoc pixel
+   values, so nothing sits half a step off (the reported misalignment). */
 .ribbon {
   grid-column: 1 / -1;
   display: flex;
   align-items: stretch;
-  gap: var(--tl-space-2);
-  padding: var(--tl-space-1) var(--tl-space-3);
+  gap: var(--tl-space-3);
+  padding: var(--tl-space-2) var(--tl-space-4);
   background: var(--tl-color-surface);
   border-bottom: var(--tl-border-hairline);
   min-height: var(--tl-ribbon-h);
@@ -527,14 +530,14 @@ button.app-statusbar__jump:hover {
 .ribbon__commands {
   display: flex;
   align-items: stretch;
-  gap: var(--tl-space-1);
+  gap: var(--tl-space-2);
   min-width: 0;
 }
 
 .ribbon__slot {
   display: flex;
   align-items: stretch;
-  gap: var(--tl-space-1);
+  gap: var(--tl-space-2);
 }
 
 /* Groups: a labeled column of stacked buttons, separated by a hairline.
@@ -550,22 +553,23 @@ button.app-statusbar__jump:hover {
 .ribbon__group-items {
   display: flex;
   align-items: flex-start;
-  gap: var(--tl-space-1);
+  gap: var(--tl-space-2);
 }
 .ribbon__group-label {
   flex-basis: 100%;
   order: 3;
-  padding-top: 1px;
+  padding-top: var(--tl-space-1);
   text-align: center;
-  font-size: 9.5px;
+  /* Never below the 12px CJK rendering floor (Windows DirectWrite). */
+  font-size: var(--tl-text-xs);
   line-height: 1;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.05em;
   color: var(--tl-color-text-faint);
   user-select: none;
 }
 .ribbon__divider {
   width: 1px;
-  margin: var(--tl-space-2) var(--tl-space-2);
+  margin: var(--tl-space-2) var(--tl-space-3);
   background: var(--tl-color-border);
   flex: none;
   align-self: stretch;
@@ -622,8 +626,8 @@ button.app-statusbar__jump:hover {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  min-width: 52px;
+  gap: var(--tl-space-2);
+  min-width: 56px;
   padding: var(--tl-space-2) var(--tl-space-2);
   font-family: var(--tl-font-ui);
   font-size: var(--tl-text-xs);
@@ -1737,7 +1741,9 @@ button.app-statusbar__jump:hover {
 
 .segment-grid td {
   padding: 6px var(--tl-space-3);
-  font-size: var(--tl-text-md);
+  /* User-tunable editing type (设置 ▸ 字体); falls back to the UI scale. */
+  font-family: var(--tl-editor-font, inherit);
+  font-size: var(--tl-editor-size, var(--tl-text-md));
   line-height: 1.5;
 }
 
@@ -2648,6 +2654,96 @@ button.app-statusbar__jump:hover {
   gap: var(--tl-space-4);
 }
 
+/* ---------------------------------------------------------------------
+   Application settings center: a section rail beside the content pane.
+   Type hierarchy: the rail and body stay at md, section titles step up to
+   lg — never same-size-just-bold. */
+.settings-dialog {
+  display: flex;
+  gap: var(--tl-space-5);
+  min-height: 380px;
+}
+
+.settings-dialog__rail {
+  flex: none;
+  width: 128px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-1);
+  padding-right: var(--tl-space-4);
+  border-right: var(--tl-border-hairline);
+}
+
+.settings-dialog__rail-item {
+  display: block;
+  width: 100%;
+  padding: var(--tl-space-2) var(--tl-space-3);
+  border: none;
+  border-radius: var(--tl-radius-md);
+  background: transparent;
+  color: var(--tl-color-text-muted);
+  font-size: var(--tl-text-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-dialog__rail-item:hover {
+  background: var(--tl-color-sunken);
+}
+
+.settings-dialog__rail-item[data-active] {
+  background: var(--tl-color-accent-faint);
+  color: var(--tl-color-accent);
+  font-weight: 600;
+}
+
+.settings-dialog__content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-4);
+  overflow-y: auto;
+}
+
+.settings-dialog__title {
+  margin: 0;
+  font-size: var(--tl-text-lg);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.settings-section__intro {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-3);
+  align-items: flex-start;
+}
+
+.settings-section__note {
+  margin: 0;
+  font-size: var(--tl-text-sm);
+  line-height: 1.6;
+  color: var(--tl-color-text-muted);
+}
+
+.ai-provider-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-5);
+}
+
+/* API key input with the reveal toggle sitting on the control's row. */
+.ai-provider-settings__key {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--tl-space-3);
+}
+
+.ai-provider-settings__key .tl-field {
+  flex: 1;
+}
+
 .form-row {
   display: flex;
   gap: var(--tl-space-3);
@@ -2889,11 +2985,12 @@ button.app-statusbar__jump:hover {
 
 .settings__heading {
   margin: 0;
-  font-size: var(--tl-text-xs);
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--tl-color-text-muted);
+  /* A real step above the items it titles — hierarchy by size, not by
+     bold-only (the reported same-size-just-bold problem). */
+  font-size: var(--tl-text-lg);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--tl-color-text);
 }
 
 .settings__row {

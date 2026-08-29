@@ -5,6 +5,7 @@ import { Badge, Button, EmptyState, TextField } from "@translunar/ui";
 
 import type { EngineLifecycleState } from "../../shared/desktop-api.js";
 import { callEngine, describeError } from "../lib/engine.js";
+import { LocaleField } from "../components/LocaleField.js";
 
 export interface ProjectsViewProps {
   engineState: EngineLifecycleState;
@@ -154,14 +155,15 @@ export function ProjectsView({
           value={name}
           onChange={(event) => setName(event.target.value)}
           required
+          placeholder="如：TL-900 用户手册"
         />
-        <TextField
+        <LocaleField
           label="源语言"
           value={sourceLocale}
           onChange={(event) => setSourceLocale(event.target.value)}
           required
         />
-        <TextField
+        <LocaleField
           label="目标语言"
           value={targetLocale}
           onChange={(event) => setTargetLocale(event.target.value)}

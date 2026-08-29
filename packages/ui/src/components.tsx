@@ -35,14 +35,21 @@ export function Button({
 
 export interface TextFieldProps extends InputHTMLAttributes<HTMLInputElement> {
   label: string;
+  /** One quiet line under the control: format hints, examples, scope. */
+  hint?: ReactNode;
 }
 
-export function TextField({ label, className, ...rest }: TextFieldProps) {
+export function TextField({ label, hint, className, ...rest }: TextFieldProps) {
+  // The hint lives outside the <label> so it never pollutes the control's
+  // accessible name — screen readers and tests keep the bare label text.
   return (
-    <label className={join("tl-field", className)}>
-      <span className="tl-field__label">{label}</span>
-      <input className="tl-field__control" {...rest} />
-    </label>
+    <div className={join("tl-field", className)}>
+      <label className="tl-field__body">
+        <span className="tl-field__label">{label}</span>
+        <input className="tl-field__control" {...rest} />
+      </label>
+      {hint ? <span className="tl-field__hint">{hint}</span> : null}
+    </div>
   );
 }
 
@@ -66,21 +73,27 @@ export function TextAreaField({
 export interface SelectFieldProps extends SelectHTMLAttributes<HTMLSelectElement> {
   label: string;
   children: ReactNode;
+  /** One quiet line under the control: format hints, examples, scope. */
+  hint?: ReactNode;
 }
 
 export function SelectField({
   label,
+  hint,
   className,
   children,
   ...rest
 }: SelectFieldProps) {
   return (
-    <label className={join("tl-field", className)}>
-      <span className="tl-field__label">{label}</span>
-      <select className="tl-field__control" {...rest}>
-        {children}
-      </select>
-    </label>
+    <div className={join("tl-field", className)}>
+      <label className="tl-field__body">
+        <span className="tl-field__label">{label}</span>
+        <select className="tl-field__control" {...rest}>
+          {children}
+        </select>
+      </label>
+      {hint ? <span className="tl-field__hint">{hint}</span> : null}
+    </div>
   );
 }
 

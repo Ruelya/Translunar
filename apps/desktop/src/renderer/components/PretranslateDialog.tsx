@@ -69,6 +69,7 @@ export function PretranslateDialog({
           max={100}
           value={raw}
           disabled={busy}
+          hint="只回填得分不低于该阈值的 TM 匹配；100 表示仅精确匹配"
           onChange={(event) => setRaw(event.target.value)}
         />
         <p className="settings__note">

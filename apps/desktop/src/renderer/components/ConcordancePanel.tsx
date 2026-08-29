@@ -246,6 +246,7 @@ export function ConcordancePanel({
           label="检索词"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
+          placeholder="词或短语，双语子串匹配"
         />
         {query.trim().length === 0 ? (
           <EmptyState title="输入检索词" />

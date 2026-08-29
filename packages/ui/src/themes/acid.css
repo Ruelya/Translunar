@@ -34,12 +34,12 @@
   --tl-status-info-soft: rgba(0, 49, 173, 0.1);
   --tl-color-scrim: rgba(23, 23, 15, 0.32);
   --tl-font-ui:
-    "Familjen Grotesk", "PingFang SC", "Noto Sans CJK SC",
-    "WenQuanYi Micro Hei", system-ui, sans-serif;
+    "Familjen Grotesk", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Noto Sans CJK SC", "WenQuanYi Micro Hei", system-ui, sans-serif;
   --tl-font-mono: "Space Mono", ui-monospace, monospace;
-  --tl-text-xs: 10px;
-  --tl-text-sm: 11.5px;
-  --tl-text-md: 13px;
+  --tl-text-xs: 12px;
+  --tl-text-sm: 13px;
+  --tl-text-md: 14px;
   --tl-text-lg: 15px;
   --tl-text-xl: 22px;
   --tl-radius-sm: 0;

@@ -112,6 +112,9 @@ export function buildMenuTemplate(
         context.projectOpen,
         "CmdOrCtrl+,",
       ),
+      // Application-level preferences (外观/字体/AI 供应商/快捷键) — a
+      // separate surface from the per-project settings above it.
+      commandItem("应用设置…", "open-app-settings", true),
       commandItem("返回项目列表", "close-project", context.projectOpen),
       ...(isMac ? [] : [SEPARATOR, { role: "quit", label: "退出" } as const]),
     ],
@@ -248,8 +251,15 @@ export function buildMenuTemplate(
       ),
       SEPARATOR,
       { role: "resetZoom", label: "实际大小" },
-      { role: "zoomIn", label: "放大" },
-      { role: "zoomOut", label: "缩小" },
+      // Electron's zoomIn role defaults to CmdOrCtrl+Shift+= — on Windows
+      // that leaves plain Ctrl+= dead while Ctrl+- works. Bind Ctrl+= as
+      // the visible accelerator and keep Ctrl+Shift+= (Plus) plus the
+      // numpad chords as hidden aliases so every physical zoom key works.
+      { role: "zoomIn", label: "放大", accelerator: "CmdOrCtrl+=" },
+      { role: "zoomOut", label: "缩小", accelerator: "CmdOrCtrl+-" },
+      { role: "zoomIn", visible: false, accelerator: "CmdOrCtrl+Plus" },
+      { role: "zoomIn", visible: false, accelerator: "CmdOrCtrl+numadd" },
+      { role: "zoomOut", visible: false, accelerator: "CmdOrCtrl+numsub" },
       SEPARATOR,
       { role: "togglefullscreen", label: "切换全屏" },
     ],

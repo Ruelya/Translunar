@@ -252,6 +252,7 @@ export function TermManagePanel({ termbase }: TermManagePanelProps) {
                 value={editSource}
                 onChange={(event) => setEditSource(event.target.value)}
                 required
+                placeholder="源语言术语原文"
               />
               {editing.translationId !== null ? (
                 <TextField
@@ -259,6 +260,7 @@ export function TermManagePanel({ termbase }: TermManagePanelProps) {
                   value={editTarget}
                   onChange={(event) => setEditTarget(event.target.value)}
                   required
+                  placeholder="目标语言的规范译法"
                 />
               ) : null}
               <div className="settings__row">

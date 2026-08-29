@@ -45,6 +45,7 @@ function renderPanel(
         activeSegment={segment}
         onApplyDraft={vi.fn()}
         onStatusMessage={vi.fn()}
+        onOpenSettings={vi.fn()}
         {...overrides}
       />
     </AiStatusProvider>,
@@ -86,187 +87,24 @@ afterEach(() => {
 });
 
 describe("AiPanel", () => {
-  it("shows the honest unconfigured state instead of fake output", async () => {
+  it("shows the honest unconfigured state and routes to the settings center", async () => {
     installBridge(
       vi.fn().mockResolvedValue({
         ok: true,
         result: { configured: false, provider: null, model: null },
       }),
     );
-    renderPanel();
+    const onOpenSettings = vi.fn();
+    renderPanel({ onOpenSettings });
     await waitFor(() => {
       expect(screen.getByText("未配置")).toBeInTheDocument();
     });
-    expect(screen.getByLabelText("API Key")).toBeInTheDocument();
+    // Configuration lives in the settings center now — the dock carries no
+    // credential form and no fake output.
+    expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
     expect(screen.queryByText("AI 翻译")).not.toBeInTheDocument();
-  });
-
-  it("adds the first profile through ai.profile.add and never echoes the key", async () => {
-    let added = false;
-    const invoke = vi.fn(
-      (method: string, params: unknown): Promise<EngineInvokeResponse> => {
-        if (method === "ai.status") {
-          return Promise.resolve(
-            added
-              ? {
-                  ok: true,
-                  result: {
-                    configured: true,
-                    provider: "gemini",
-                    model: "gemini-2.5-flash",
-                    profileCount: 1,
-                  },
-                }
-              : {
-                  ok: true,
-                  result: { configured: false, provider: null, model: null },
-                },
-          );
-        }
-        if (method === "ai.profile.add") {
-          added = true;
-          void params;
-          return Promise.resolve({
-            ok: true,
-            result: {
-              profiles: [
-                {
-                  profileId: "p1",
-                  provider: "gemini",
-                  model: "gemini-2.5-flash",
-                  label: "Gemini 主力",
-                  baseUrl: "https://gateway.example/v1beta",
-                  createdAtMs: 1,
-                },
-              ],
-              defaultProfileId: "p1",
-            },
-          });
-        }
-        if (method === "ai.profile.list") {
-          return Promise.resolve({
-            ok: true,
-            result: {
-              profiles: [
-                {
-                  profileId: "p1",
-                  provider: "gemini",
-                  model: "gemini-2.5-flash",
-                  label: "Gemini 主力",
-                  baseUrl: "https://gateway.example/v1beta",
-                  createdAtMs: 1,
-                },
-              ],
-              defaultProfileId: "p1",
-            },
-          });
-        }
-        return Promise.resolve({
-          ok: false,
-          error: { code: "internal", message: `unexpected ${method}` },
-        });
-      },
-    );
-    installBridge(invoke);
-    renderPanel();
-    await waitFor(() => {
-      expect(screen.getByLabelText("供应商")).toBeInTheDocument();
-    });
-    await userEvent.selectOptions(screen.getByLabelText("供应商"), "gemini");
-    await userEvent.type(screen.getByLabelText("模型"), "gemini-2.5-flash");
-    await userEvent.type(
-      screen.getByLabelText("显示名（可选）"),
-      "Gemini 主力",
-    );
-    await userEvent.type(
-      screen.getByLabelText("Base URL"),
-      "https://gateway.example/v1beta",
-    );
-    await userEvent.type(screen.getByLabelText("API Key"), "test-key");
-    await userEvent.click(screen.getByRole("button", { name: "保存配置" }));
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("ai.profile.add", {
-        provider: "gemini",
-        model: "gemini-2.5-flash",
-        label: "Gemini 主力",
-        baseUrl: "https://gateway.example/v1beta",
-        apiKey: "test-key",
-      });
-    });
-    // The configured badge and the profile row replace the credential form.
-    await waitFor(() => {
-      expect(screen.getByText(/gemini · gemini-2.5-flash/)).toBeInTheDocument();
-    });
-    expect(screen.getByText("Gemini 主力")).toBeInTheDocument();
-    // The key never comes back: no field or row carries it.
-    expect(screen.queryByDisplayValue("test-key")).not.toBeInTheDocument();
-    expect(screen.queryByText(/test-key/)).not.toBeInTheDocument();
-  });
-
-  it("removes a profile through ai.profile.remove", async () => {
-    const profileA = {
-      profileId: "p-a",
-      provider: "openai",
-      model: "gpt-a",
-      label: "甲",
-      baseUrl: "",
-      createdAtMs: 1,
-    };
-    const profileB = {
-      profileId: "p-b",
-      provider: "deepseek",
-      model: "ds-b",
-      label: "乙",
-      baseUrl: "",
-      createdAtMs: 2,
-    };
-    let profiles = [profileA, profileB];
-    const invoke = vi.fn((method: string): Promise<EngineInvokeResponse> => {
-      if (method === "ai.status") {
-        return Promise.resolve({
-          ok: true,
-          result: {
-            configured: true,
-            provider: profiles[0]?.provider ?? null,
-            model: profiles[0]?.model ?? null,
-            profileCount: profiles.length,
-          },
-        });
-      }
-      if (method === "ai.profile.list") {
-        return Promise.resolve({
-          ok: true,
-          result: { profiles, defaultProfileId: profiles[0]?.profileId },
-        });
-      }
-      if (method === "ai.profile.remove") {
-        profiles = [profileB];
-        return Promise.resolve({
-          ok: true,
-          result: { profiles, defaultProfileId: "p-b" },
-        });
-      }
-      return Promise.resolve({
-        ok: false,
-        error: { code: "internal", message: `unexpected ${method}` },
-      });
-    });
-    installBridge(invoke);
-    renderPanel();
-    await waitFor(() => {
-      expect(screen.getByText("甲")).toBeInTheDocument();
-    });
-    await userEvent.click(screen.getAllByRole("button", { name: "移除" })[0]!);
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("ai.profile.remove", {
-        profileId: "p-a",
-      });
-    });
-    // The engine's refreshed list drives the rows; the removed row is gone.
-    await waitFor(() => {
-      expect(screen.queryByText("甲")).not.toBeInTheDocument();
-    });
-    expect(screen.getByText("乙")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "打开 AI 设置" }));
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
   });
 
   it("blocks Apply when the candidate breaks placeholders", async () => {
@@ -490,6 +328,7 @@ describe("AiPanel", () => {
           activeSegment={segment}
           onApplyDraft={vi.fn()}
           onStatusMessage={vi.fn()}
+          onOpenSettings={vi.fn()}
           request={{ action: "translate", token: 1 }}
           onRequestConsumed={onRequestConsumed}
         />

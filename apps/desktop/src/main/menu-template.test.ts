@@ -45,6 +45,7 @@ const COMMAND_ITEMS: Array<{
     accelerator: "CmdOrCtrl+,",
     needs: "project",
   },
+  { label: "应用设置…", command: "open-app-settings", needs: "none" },
   { label: "返回项目列表", command: "close-project", needs: "project" },
   {
     label: "确认当前句段",
@@ -351,6 +352,30 @@ describe("buildMenuTemplate honesty (enablement)", () => {
         expect(item.enabled, String(item.role)).not.toBe(false);
       }
     }
+  });
+});
+
+describe("buildMenuTemplate zoom accelerators (Windows Ctrl+= regression)", () => {
+  it("binds plain CmdOrCtrl+= as the visible zoom-in accelerator", () => {
+    const { template } = build(NO_PROJECT, { platform: "win32" });
+    const visible = flatten(template).find(
+      (item) => item.role === "zoomIn" && item.visible !== false,
+    );
+    // The role default is CmdOrCtrl+Shift+= on Windows, which leaves the
+    // reported Ctrl+= dead. The explicit accelerator is the fix.
+    expect(visible?.accelerator).toBe("CmdOrCtrl+=");
+    expect(visible?.label).toBe("放大");
+  });
+
+  it("keeps hidden aliases so Shift+= and the numpad keys also zoom", () => {
+    const { template } = build(NO_PROJECT, { platform: "win32" });
+    const accelerators = flatten(template)
+      .filter((item) => item.role === "zoomIn" || item.role === "zoomOut")
+      .map((item) => item.accelerator);
+    expect(accelerators).toContain("CmdOrCtrl+Plus");
+    expect(accelerators).toContain("CmdOrCtrl+numadd");
+    expect(accelerators).toContain("CmdOrCtrl+numsub");
+    expect(accelerators).toContain("CmdOrCtrl+-");
   });
 });
 

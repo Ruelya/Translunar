@@ -21,6 +21,7 @@ import {
 } from "../lib/engine.js";
 import { ExportOverwriteConfirm } from "./ExportOverwriteConfirm.js";
 import { defaultSegmentation, defaultSrxPath } from "./ImportDocumentDialog.js";
+import { LocaleField } from "./LocaleField.js";
 import { TermManagePanel } from "./TermManagePanel.js";
 
 type SegmentationChoice = "sentence" | "paragraph";
@@ -809,15 +810,16 @@ export function ProjectSettingsDialog({
               value={nameDraft}
               onChange={(event) => setNameDraft(event.target.value)}
               required
+              placeholder="如：TL-900 用户手册"
             />
             <div className="form-row">
-              <TextField
+              <LocaleField
                 label="源语言"
                 value={sourceDraft}
                 onChange={(event) => setSourceDraft(event.target.value)}
                 required
               />
-              <TextField
+              <LocaleField
                 label="目标语言"
                 value={targetDraft}
                 onChange={(event) => setTargetDraft(event.target.value)}
@@ -941,6 +943,8 @@ export function ProjectSettingsDialog({
                   inputMode="numeric"
                   value={qaSettingsDraft.minLengthRatioPercent}
                   disabled={pending.has("qa.profile")}
+                  placeholder="如 30"
+                  hint="译文长度低于源文的该百分比时报长度问题"
                   onChange={(event) =>
                     setQaSettingsDraft({
                       ...qaSettingsDraft,
@@ -953,6 +957,8 @@ export function ProjectSettingsDialog({
                   inputMode="numeric"
                   value={qaSettingsDraft.maxLengthRatioPercent}
                   disabled={pending.has("qa.profile")}
+                  placeholder="如 250"
+                  hint="译文长度超过源文的该百分比时报长度问题"
                   onChange={(event) =>
                     setQaSettingsDraft({
                       ...qaSettingsDraft,
@@ -965,6 +971,8 @@ export function ProjectSettingsDialog({
                   inputMode="numeric"
                   value={qaSettingsDraft.maxTargetChars}
                   disabled={pending.has("qa.profile")}
+                  placeholder="0 表示不限"
+                  hint="单句译文的字符数硬上限"
                   onChange={(event) =>
                     setQaSettingsDraft({
                       ...qaSettingsDraft,
@@ -1257,6 +1265,7 @@ export function ProjectSettingsDialog({
               label="新术语库名称"
               value={newTermbaseName}
               onChange={(event) => setNewTermbaseName(event.target.value)}
+              placeholder="如：产品术语库"
             />
             <Button
               type="submit"

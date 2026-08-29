@@ -44,6 +44,7 @@ export type MenuCommand =
   | "import-document"
   | "export-document"
   | "open-project-settings"
+  | "open-app-settings"
   | "close-project"
   | "open-command-palette"
   | "toggle-preview"

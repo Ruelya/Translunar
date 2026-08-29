@@ -124,12 +124,26 @@
   font-family: var(--tl-font-ui);
 }
 
+/* Label + control pair inside the field (the hint sits outside it). */
+.tl-field__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-2);
+}
+
 .tl-field__label {
   font-size: var(--tl-text-xs);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--tl-color-text-muted);
+}
+
+/* Format hints and examples under a control: quiet guidance, no alarm. */
+.tl-field__hint {
+  font-size: var(--tl-text-xs);
+  line-height: 1.5;
+  color: var(--tl-color-text-faint);
 }
 
 .tl-field__control {

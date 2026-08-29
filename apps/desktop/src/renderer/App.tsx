@@ -8,9 +8,10 @@ import type {
   EngineStatusPayload,
 } from "../shared/desktop-api.js";
 import { AboutDialog } from "./components/AboutDialog.js";
-import { AppearanceDialog } from "./components/AppearanceDialog.js";
 import { EngineGate } from "./components/EngineGate.js";
 import { ProjectSettingsDialog } from "./components/ProjectSettingsDialog.js";
+import { SettingsDialog } from "./components/SettingsDialog.js";
+import type { SettingsSection } from "./components/SettingsDialog.js";
 import { ShortcutsDialog } from "./components/ShortcutsDialog.js";
 import { TitleBar } from "./components/TitleBar.js";
 import { TmManageDialog } from "./components/TmManageDialog.js";
@@ -60,7 +61,13 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [documentOpen, setDocumentOpen] = useState(false);
   const [tmManageOpen, setTmManageOpen] = useState(false);
-  const [appearanceOpen, setAppearanceOpen] = useState(false);
+  // The application settings center (外观/字体/AI 供应商/快捷键). Openers
+  // land on the section they promise: the statusbar theme chip on 外观,
+  // the AI dock's 打开设置 on AI 供应商.
+  const [appSettings, setAppSettings] = useState<{
+    open: boolean;
+    section: SettingsSection;
+  }>({ open: false, section: "appearance" });
   // 帮助 dialogs are shell chrome: they open with or without a project.
   const [helpDialog, setHelpDialog] = useState<"keys" | "about" | null>(null);
   // The stored QA export gate, reported by the workbench (and by the
@@ -144,6 +151,11 @@ export function App() {
   }, []);
   const handleOpenShortcuts = useCallback(() => setHelpDialog("keys"), []);
   const handleOpenAbout = useCallback(() => setHelpDialog("about"), []);
+  const handleOpenAppSettings = useCallback(
+    (section: SettingsSection = "appearance") =>
+      setAppSettings({ open: true, section }),
+    [],
+  );
 
   // Shell-level menu commands; workbench-level ones are handled inside
   // WorkbenchView. Both go through the same actions as the ribbon buttons.
@@ -160,13 +172,21 @@ export function App() {
         setProject(null);
       } else if (command === "new-project") {
         handleNewProject();
+      } else if (command === "open-app-settings") {
+        handleOpenAppSettings();
       } else if (command === "help-keys") {
         handleOpenShortcuts();
       } else if (command === "about") {
         handleOpenAbout();
       }
     });
-  }, [project, handleNewProject, handleOpenShortcuts, handleOpenAbout]);
+  }, [
+    project,
+    handleNewProject,
+    handleOpenAppSettings,
+    handleOpenShortcuts,
+    handleOpenAbout,
+  ]);
 
   const handleStatusMessage = useCallback((message: string) => {
     setStatusMessage(message);
@@ -183,7 +203,14 @@ export function App() {
   }, []);
 
   const handleOpenSettings = useCallback(() => setSettingsOpen(true), []);
-  const handleOpenAppearance = useCallback(() => setAppearanceOpen(true), []);
+  const handleOpenAppearance = useCallback(
+    () => handleOpenAppSettings("appearance"),
+    [handleOpenAppSettings],
+  );
+  const handleOpenAiSettings = useCallback(
+    () => handleOpenAppSettings("ai"),
+    [handleOpenAppSettings],
+  );
   const handleOpenTmManage = useCallback(() => setTmManageOpen(true), []);
   const handleCloseProject = useCallback(() => {
     setSettingsOpen(false);
@@ -219,6 +246,7 @@ export function App() {
             onRegisterStatJump={registerStatJump}
             onOpenSettings={handleOpenSettings}
             onOpenAppearance={handleOpenAppearance}
+            onOpenAiSettings={handleOpenAiSettings}
             onOpenTmManage={handleOpenTmManage}
             onCloseProject={handleCloseProject}
             onNewProject={handleNewProject}
@@ -372,9 +400,16 @@ export function App() {
         </span>
       </footer>
 
-      <AppearanceDialog
-        open={appearanceOpen}
-        onClose={() => setAppearanceOpen(false)}
+      <SettingsDialog
+        open={appSettings.open}
+        section={appSettings.section}
+        onSectionChange={(section) =>
+          setAppSettings((current) => ({ ...current, section }))
+        }
+        onClose={() =>
+          setAppSettings((current) => ({ ...current, open: false }))
+        }
+        onStatusMessage={handleStatusMessage}
       />
 
       <ShortcutsDialog

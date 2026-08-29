@@ -711,6 +711,7 @@ export function TmManageDialog({
                 label="新建记忆库"
                 value={newMemoryName}
                 onChange={(event) => setNewMemoryName(event.target.value)}
+                placeholder="如：医疗器械主库"
               />
               <Button
                 size="sm"
@@ -756,6 +757,7 @@ export function TmManageDialog({
                   label="搜索源文或译文"
                   value={queryInput}
                   onChange={(event) => setQueryInput(event.target.value)}
+                  placeholder="输入片段，双语都会匹配"
                 />
                 <Button
                   type="submit"

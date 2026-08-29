@@ -126,6 +126,8 @@ export interface WorkbenchViewProps {
   onOpenSettings?: () => void;
   /** Opens the appearance dialog; also surfaced as palette theme commands. */
   onOpenAppearance?: () => void;
+  /** Opens the application settings at the AI provider section. */
+  onOpenAiSettings?: () => void;
   /** Opens the TM manage dialog (owned by the shell). */
   onOpenTmManage?: () => void;
   /** Returns to the projects list (same path as the menu command). */
@@ -294,6 +296,7 @@ export function WorkbenchView({
   onRegisterStatJump,
   onOpenSettings,
   onOpenAppearance,
+  onOpenAiSettings,
   onOpenTmManage,
   onCloseProject,
   onNewProject,
@@ -3592,6 +3595,7 @@ export function WorkbenchView({
                   activeSegment={activeSegment}
                   onApplyDraft={applyAiDraftToActive}
                   onStatusMessage={onStatusMessage}
+                  onOpenSettings={() => onOpenAiSettings?.()}
                   request={aiRequest}
                   onRequestConsumed={() => setAiRequest(null)}
                 />
@@ -3694,6 +3698,8 @@ export function WorkbenchView({
               inputMode="numeric"
               autoFocus
               value={goToValue}
+              placeholder={`1–${segments.length || 1}`}
+              hint={`当前文档共 ${segments.length} 个句段`}
               onChange={(event) => {
                 setGoToValue(event.target.value);
                 setGoToNote(null);

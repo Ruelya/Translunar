@@ -30,6 +30,22 @@ const SHORTCUTS: ReadonlyArray<[string, string]> = [
   ["清除筛选", "Esc"],
 ];
 
+/** The bare chord table — reused by the settings dialog's 快捷键 section. */
+export function ShortcutsList() {
+  return (
+    <dl className="shortcuts">
+      {SHORTCUTS.map(([label, keys]) => (
+        <div key={label} className="shortcuts__row">
+          <dt>{label}</dt>
+          <dd>
+            <kbd>{keys}</kbd>
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 export interface ShortcutsDialogProps {
   open: boolean;
   onClose: () => void;
@@ -47,16 +63,7 @@ export function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps) {
         </Button>
       }
     >
-      <dl className="shortcuts">
-        {SHORTCUTS.map(([label, keys]) => (
-          <div key={label} className="shortcuts__row">
-            <dt>{label}</dt>
-            <dd>
-              <kbd>{keys}</kbd>
-            </dd>
-          </div>
-        ))}
-      </dl>
+      <ShortcutsList />
     </Dialog>
   );
 }

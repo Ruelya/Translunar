@@ -1,41 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type {
-  AiAssistResult,
-  AiProviderKind,
-  Segment,
-} from "@translunar/contracts";
-import {
-  Badge,
-  Button,
-  EmptyState,
-  Panel,
-  SelectField,
-  TextField,
-} from "@translunar/ui";
+import type { AiAssistResult, Segment } from "@translunar/contracts";
+import { Badge, Button, EmptyState, Panel } from "@translunar/ui";
 
 import { useAiStatus } from "../lib/ai-status.js";
 import { diffChars } from "../lib/diff.js";
 import { callEngine, describeError, isAiNotConfigured } from "../lib/engine.js";
 
-const PROVIDERS: Array<{ value: AiProviderKind; label: string }> = [
-  { value: "openai", label: "OpenAI" },
-  { value: "openaiResponses", label: "OpenAI Responses" },
-  { value: "anthropic", label: "Anthropic" },
-  { value: "gemini", label: "Google Gemini" },
-  { value: "deepl", label: "DeepL" },
-  { value: "deepseek", label: "DeepSeek" },
-  { value: "qwen", label: "通义千问" },
-  { value: "glm", label: "智谱 GLM" },
-  { value: "kimi", label: "Kimi" },
-  { value: "volcengine", label: "火山引擎" },
-  { value: "openaiCompatible", label: "OpenAI 兼容端点" },
-];
-
 /** Assist runs off the engine RPC thread; the panel polls until terminal. */
 const ASSIST_POLL_INTERVAL_MS = 150;
-/** The engine caps the in-memory profile list; the form hides at the cap. */
-const MAX_PROFILES = 6;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -49,6 +22,12 @@ export interface AiPanelProps {
    */
   onApplyDraft: (targetText: string, model: string) => void;
   onStatusMessage: (message: string) => void;
+  /**
+   * Opens the application settings at the AI provider section. Provider
+   * configuration lives there — the dock panel only reports status and
+   * runs assists.
+   */
+  onOpenSettings: () => void;
   /**
    * Menu-driven assist (翻译 ▸ AI 翻译/润色当前句段). Each token runs the
    * exact assist the panel buttons run, once. When the panel would refuse
@@ -80,23 +59,11 @@ export function AiPanel({
   activeSegment,
   onApplyDraft,
   onStatusMessage,
+  onOpenSettings,
   request,
   onRequestConsumed,
 }: AiPanelProps) {
-  const {
-    status,
-    configured,
-    profiles,
-    defaultProfileId,
-    refresh,
-    setProfiles,
-  } = useAiStatus();
-  const [provider, setProvider] = useState<AiProviderKind>("openai");
-  const [model, setModel] = useState("");
-  const [label, setLabel] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [showAddForm, setShowAddForm] = useState(false);
+  const { status, configured, profiles } = useAiStatus();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
@@ -110,56 +77,6 @@ export function AiPanel({
       assistGeneration.current += 1;
     };
   }, []);
-
-  const addProfile = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const list = await callEngine("ai.profile.add", {
-        provider,
-        model,
-        label: label.trim() ? label.trim() : null,
-        baseUrl: baseUrl.trim() ? baseUrl.trim() : null,
-        apiKey,
-      });
-      setProfiles(list);
-      setApiKey("");
-      setModel("");
-      setLabel("");
-      setBaseUrl("");
-      setShowAddForm(false);
-      await refresh();
-      onStatusMessage(`模型已添加：${provider} / ${model}`);
-    } catch (addError) {
-      setError(describeError(addError));
-    } finally {
-      setBusy(false);
-    }
-  }, [
-    provider,
-    model,
-    label,
-    baseUrl,
-    apiKey,
-    onStatusMessage,
-    refresh,
-    setProfiles,
-  ]);
-
-  const removeProfile = useCallback(
-    async (profileId: string) => {
-      setError(null);
-      try {
-        const list = await callEngine("ai.profile.remove", { profileId });
-        setProfiles(list);
-        await refresh();
-        onStatusMessage("模型已移除");
-      } catch (removeError) {
-        setError(describeError(removeError));
-      }
-    },
-    [onStatusMessage, refresh, setProfiles],
-  );
 
   // ai.assist.start returns immediately; the provider call runs off the
   // engine RPC thread and this panel polls ai.assist.status until terminal.
@@ -355,58 +272,6 @@ export function AiPanel({
     );
   }, []);
 
-  const profileForm = (
-    <form
-      className="form-stack"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void addProfile();
-      }}
-    >
-      <SelectField
-        label="供应商"
-        value={provider}
-        onChange={(event) => setProvider(event.target.value as AiProviderKind)}
-      >
-        {PROVIDERS.map((item) => (
-          <option key={item.value} value={item.value}>
-            {item.label}
-          </option>
-        ))}
-      </SelectField>
-      <TextField
-        label="模型"
-        value={model}
-        onChange={(event) => setModel(event.target.value)}
-        required
-      />
-      <TextField
-        label="显示名（可选）"
-        value={label}
-        onChange={(event) => setLabel(event.target.value)}
-      />
-      <TextField
-        label="Base URL"
-        value={baseUrl}
-        onChange={(event) => setBaseUrl(event.target.value)}
-      />
-      <TextField
-        label="API Key"
-        type="password"
-        value={apiKey}
-        onChange={(event) => setApiKey(event.target.value)}
-        required
-      />
-      <Button
-        type="submit"
-        variant="primary"
-        disabled={busy || !model.trim() || !apiKey.trim()}
-      >
-        {busy ? "验证中…" : profiles.length === 0 ? "保存配置" : "添加模型"}
-      </Button>
-    </form>
-  );
-
   return (
     <Panel
       title="AI 辅助"
@@ -426,35 +291,6 @@ export function AiPanel({
       <div className="dock-stack">
         {configured ? (
           <>
-            {profiles.length > 0 ? (
-              <div className="ai-profiles" data-testid="ai-profiles">
-                {profiles.map((profile) => (
-                  <div key={profile.profileId} className="ai-profiles__row">
-                    <span className="ai-profiles__label">{profile.label}</span>
-                    {profile.profileId === defaultProfileId ? (
-                      <Badge tone="neutral">默认</Badge>
-                    ) : null}
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => void removeProfile(profile.profileId)}
-                    >
-                      移除
-                    </Button>
-                  </div>
-                ))}
-                {profiles.length < MAX_PROFILES ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setShowAddForm((open) => !open)}
-                  >
-                    {showAddForm ? "收起" : "添加模型"}
-                  </Button>
-                ) : null}
-              </div>
-            ) : null}
-            {showAddForm && profiles.length < MAX_PROFILES ? profileForm : null}
             {!activeSegment ? (
               <EmptyState title="未选中句段" />
             ) : confirmedSegment ? (
@@ -486,6 +322,9 @@ export function AiPanel({
                     取消请求
                   </Button>
                 ) : null}
+                <Button variant="ghost" size="sm" onClick={onOpenSettings}>
+                  管理模型…
+                </Button>
               </div>
             )}
             {!confirmedSegment && failures.length > 0
@@ -602,7 +441,19 @@ export function AiPanel({
               : null}
           </>
         ) : (
-          profileForm
+          // Honest unconfigured state: no fake output, one path forward —
+          // the settings center owns provider configuration.
+          <div className="dock-stack">
+            <div className="honest-note">
+              未配置 AI 供应商。在设置中添加模型后即可使用 AI 翻译/润色与 AGENT
+              模式；没有凭据时本面板不会伪造结果。
+            </div>
+            <div className="tl-toolbar">
+              <Button variant="primary" size="sm" onClick={onOpenSettings}>
+                打开 AI 设置
+              </Button>
+            </div>
+          </div>
         )}
         {error ? (
           <div className="honest-note" data-tone="danger" role="alert">

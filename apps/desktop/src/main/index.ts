@@ -11,6 +11,10 @@ import type {
   EngineInvokeResponse,
   NativeScheme,
 } from "../shared/desktop-api.js";
+import {
+  attachEditableContextMenu,
+  installContextMenus,
+} from "./context-menu.js";
 import { EngineRpcError, EngineSupervisor } from "./engine-supervisor.js";
 import { installApplicationMenu } from "./menu.js";
 import {
@@ -70,6 +74,9 @@ function createWindow(): void {
       sandbox: false,
     },
   });
+  // Native editing menu on every input/textarea (frameless windows lose
+  // the platform default otherwise).
+  attachEditableContextMenu(window);
   const devServer = process.env.VITE_DEV_SERVER_URL;
   if (devServer) {
     void window.loadURL(devServer);
@@ -374,6 +381,7 @@ void app.whenReady().then(() => {
   supervisor.start();
   registerIpc();
   installApplicationMenu();
+  installContextMenus();
   createWindow();
 
   app.on("activate", () => {

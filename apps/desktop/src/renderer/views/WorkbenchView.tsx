@@ -32,7 +32,6 @@ import type {
   Segment,
   SegmentCounts,
   SegmentOrigin,
-  TermMatch,
   TmMatchItem,
 } from "@translunar/contracts";
 import {
@@ -490,59 +489,44 @@ export function WorkbenchView({
     };
   }, [project.id, activeSegment]);
 
-  // Term hits for the active segment, fetched alongside the TM lookup so
-  // AutoSuggest works regardless of which dock tab is open. Same honesty
-  // rule: engine results only, silently empty on failure (the term dock
-  // reports its own errors when it is open).
-  const [activeTermMatches, setActiveTermMatches] = useState<TermMatch[]>([]);
-  useEffect(() => {
-    setActiveTermMatches([]);
-    if (!activeSegment) {
-      return;
-    }
-    let cancelled = false;
-    callEngine("term.lookup", {
-      projectId: project.id,
-      sourceText: activeSegment.sourceText,
-    })
-      .then((result) => {
-        if (!cancelled) {
-          setActiveTermMatches(result.matches);
-        }
-      })
-      .catch(() => {
-        // AutoSuggest simply offers no term candidates.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [project.id, activeSegment]);
-
-  // AutoSuggest candidates for the active segment: TM target texts, term
-  // targets for the project's target locale, and numbers lifted verbatim
-  // from the source. Composition only — the engine scored the TM matches
-  // and found the term spans; nothing is judged here.
-  const editorSuggestions = useMemo(() => {
-    const candidates: EditorSuggestion[] = [];
-    for (const match of tmMatches) {
-      candidates.push({ text: match.entry.targetText, kind: "tm" });
-    }
-    for (const match of activeTermMatches) {
-      for (const translation of match.translations) {
-        if (translation.locale === project.targetLocale && !translation.forbidden) {
-          candidates.push({ text: translation.term, kind: "term" });
-        }
+  // AutoSuggest data source, called by the target editor on the first
+  // keystroke of an editing session — never on mere selection, so browsing
+  // and locked rows cost no lookups. Composition only: the engine scored
+  // the TM matches and found the term spans; numbers are lifted verbatim
+  // from the source. A failed term lookup just means no term candidates.
+  const tmMatchesRef = useRef<TmMatchItem[]>([]);
+  tmMatchesRef.current = tmMatches;
+  const requestEditorSuggestions = useCallback(
+    async (segment: Segment): Promise<EditorSuggestion[]> => {
+      const candidates: EditorSuggestion[] = [];
+      for (const match of tmMatchesRef.current) {
+        candidates.push({ text: match.entry.targetText, kind: "tm" });
       }
-    }
-    if (activeSegment) {
-      for (const token of activeSegment.sourceText.matchAll(
-        /\d+(?:[.,:]\d+)*%?/g,
-      )) {
+      try {
+        const result = await callEngine("term.lookup", {
+          projectId: project.id,
+          sourceText: segment.sourceText,
+        });
+        for (const match of result.matches) {
+          for (const translation of match.translations) {
+            if (
+              translation.locale === project.targetLocale &&
+              !translation.forbidden
+            ) {
+              candidates.push({ text: translation.term, kind: "term" });
+            }
+          }
+        }
+      } catch {
+        // No term candidates — the popup shows the sources it has.
+      }
+      for (const token of segment.sourceText.matchAll(/\d+(?:[.,:]\d+)*%?/g)) {
         candidates.push({ text: token[0], kind: "number" });
       }
-    }
-    return candidates;
-  }, [tmMatches, activeTermMatches, activeSegment, project.targetLocale]);
+      return candidates;
+    },
+    [project.id, project.targetLocale],
+  );
 
   // The stored QA export gate, fetched once per project. A failed fetch
   // leaves the menu checkbox off — the toggle refetches before writing, so
@@ -1304,8 +1288,7 @@ export function WorkbenchView({
           });
           applySegments([result.segment]);
           onStatusMessage(
-            result.segment.state === "draft" &&
-              latest.state === "confirmed"
+            result.segment.state === "draft" && latest.state === "confirmed"
               ? `句段 #${segment.ordinal + 1} 源文已更新，确认状态回到草稿`
               : `句段 #${segment.ordinal + 1} 源文已更新`,
           );
@@ -2486,6 +2469,11 @@ export function WorkbenchView({
           }
           break;
         }
+        case "edit-source":
+          if (!gridRef.current?.editActiveSource()) {
+            onStatusMessage("当前句段无法编辑源文（未选中或已锁定）");
+          }
+          break;
         case "clear-target": {
           const segment = editableActive();
           if (segment) {
@@ -3418,8 +3406,26 @@ export function WorkbenchView({
                   onUpdateSource={(segment, text) =>
                     void updateSourceText(segment, text)
                   }
+                  onContextMenuRequest={(segment, position) => {
+                    // Hosts without the desktop bridge (unit tests) fall
+                    // back to the grid's DOM menu.
+                    if (typeof window.tl?.popupSegmentMenu !== "function") {
+                      return false;
+                    }
+                    void window.tl.popupSegmentMenu(
+                      {
+                        ordinal: segment.ordinal,
+                        locked: segment.locked === true,
+                        hasTarget: segment.targetText.length > 0,
+                        sourceEditable: true,
+                      },
+                      position.x,
+                      position.y,
+                    );
+                    return true;
+                  }}
                   onCaretChange={setCaret}
-                  suggestions={editorSuggestions}
+                  onRequestSuggestions={requestEditorSuggestions}
                 />
               )}
               <PreviewPane

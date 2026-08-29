@@ -7,7 +7,11 @@ import {
   useRef,
   useState,
 } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent, Ref, RefObject } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  Ref,
+  RefObject,
+} from "react";
 
 import { IconDots, IconLock, IconLockOpen } from "@tabler/icons-react";
 
@@ -74,7 +78,9 @@ function suggestPrefixAt(
 ): { start: number; text: string } | null {
   const before = value.slice(0, caret);
   let start = before.length;
-  for (const match of before.matchAll(/[\p{L}\p{N}\p{M}][\p{L}\p{N}\p{M}.,:%-]*$/gu)) {
+  for (const match of before.matchAll(
+    /[\p{L}\p{N}\p{M}][\p{L}\p{N}\p{M}.,:%-]*$/gu,
+  )) {
     start = match.index;
     break;
   }
@@ -198,18 +204,32 @@ export interface SegmentGridProps {
    */
   onUpdateSource?: (segment: Segment, sourceText: string) => void;
   /**
+   * Right-click on a row (outside editable fields — those get the native
+   * editing menu from the main process). Return true when a native menu
+   * was popped; false falls back to the grid's own DOM menu, which keeps
+   * hosts without the desktop bridge (tests) working.
+   */
+  onContextMenuRequest?: (
+    segment: Segment,
+    position: { x: number; y: number },
+  ) => boolean;
+  /**
    * Status-bar caret readout: reports the caret's line/column inside the
    * mounted target editor, and null whenever no editor is mounted. Editor
    * local facts only — never guessed from segment text.
    */
   onCaretChange?: (caret: EditorCaret | null) => void;
   /**
-   * AutoSuggest candidates for the active segment (TM target texts, term
-   * targets, source numbers — composed by the workbench from engine
-   * results). The editor prefix-filters them while typing; ↑/↓ select,
-   * Enter/Tab accept, Esc dismisses.
+   * AutoSuggest data source. Called once per editing session, on the
+   * first keystroke — never on mere selection, so locked rows and passive
+   * browsing cost nothing. The workbench composes candidates from engine
+   * results (TM target texts, term targets) and verbatim source numbers;
+   * the editor prefix-filters them while typing. ↑/↓ select, Enter/Tab
+   * accept, Esc dismisses.
    */
-  suggestions?: readonly EditorSuggestion[];
+  onRequestSuggestions?: (
+    segment: Segment,
+  ) => Promise<readonly EditorSuggestion[]>;
   /** Debounce for the typing auto-save; tests may shorten it. */
   autoSaveDelayMs?: number;
   /** Imperative access to the target editor (dock term insertion). */
@@ -388,7 +408,7 @@ interface TargetEditorProps {
   onSaveDraft: SegmentGridProps["onSaveDraft"];
   onConfirm: SegmentGridProps["onConfirm"];
   onCaretChange?: ((caret: EditorCaret | null) => void) | undefined;
-  suggestions?: readonly EditorSuggestion[] | undefined;
+  onRequestSuggestions?: SegmentGridProps["onRequestSuggestions"] | undefined;
   /** Escape pressed: the pending draft is already flushed; leave editing. */
   onExit: () => void;
   editorRef: RefObject<TargetEditorHandle | null>;
@@ -408,7 +428,7 @@ function TargetEditor({
   onSaveDraft,
   onConfirm,
   onCaretChange,
-  suggestions,
+  onRequestSuggestions,
   onExit,
   editorRef,
 }: TargetEditorProps) {
@@ -416,6 +436,10 @@ function TargetEditor({
   // by an outside write to the committed target (effect below).
   const [draft, setDraft] = useState(() => segment.targetText);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Mirror for callbacks that outlive renders (candidate fetch, flush,
+  // confirm) — always the latest segment object with the fresh revision.
+  const segmentRef = useRef(segment);
+  segmentRef.current = segment;
   // AutoSuggest: the word prefix being typed (null = popup closed). The
   // caret is a DOM fact, so this is set from input events, never derived
   // during render.
@@ -424,29 +448,57 @@ function TargetEditor({
     text: string;
   } | null>(null);
   const [suggestIndex, setSuggestIndex] = useState(0);
+  // Candidates arrive lazily: requested on the first keystroke of this
+  // editing session (never on mere selection), then filtered locally.
+  const [candidates, setCandidates] = useState<
+    readonly EditorSuggestion[] | null
+  >(null);
+  const candidatesRequestedRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const onRequestSuggestionsRef = useRef(onRequestSuggestions);
+  onRequestSuggestionsRef.current = onRequestSuggestions;
+  const requestCandidates = useCallback(() => {
+    const request = onRequestSuggestionsRef.current;
+    if (candidatesRequestedRef.current || !request) {
+      return;
+    }
+    candidatesRequestedRef.current = true;
+    request(segmentRef.current)
+      .then((list) => {
+        if (mountedRef.current) {
+          setCandidates(list);
+        }
+      })
+      .catch(() => {
+        // No candidates: the popup honestly stays away.
+      });
+  }, []);
   const suggestMatches = useMemo(
     () =>
-      suggestAnchor && suggestions && suggestions.length > 0
-        ? filterSuggestions(suggestions, suggestAnchor.text)
+      suggestAnchor && candidates && candidates.length > 0
+        ? filterSuggestions(candidates, suggestAnchor.text)
         : [],
-    [suggestions, suggestAnchor],
+    [candidates, suggestAnchor],
   );
   const suggestOpen = suggestAnchor !== null && suggestMatches.length > 0;
 
-  const refreshSuggestAnchor = useCallback(
-    (textarea: HTMLTextAreaElement) => {
-      // A selection is never a prefix; only a collapsed caret suggests.
-      if (textarea.selectionStart !== textarea.selectionEnd) {
-        setSuggestAnchor(null);
-        return;
-      }
-      setSuggestAnchor(
-        suggestPrefixAt(textarea.value, textarea.selectionStart ?? 0),
-      );
-      setSuggestIndex(0);
-    },
-    [],
-  );
+  const refreshSuggestAnchor = useCallback((textarea: HTMLTextAreaElement) => {
+    // A selection is never a prefix; only a collapsed caret suggests.
+    if (textarea.selectionStart !== textarea.selectionEnd) {
+      setSuggestAnchor(null);
+      return;
+    }
+    setSuggestAnchor(
+      suggestPrefixAt(textarea.value, textarea.selectionStart ?? 0),
+    );
+    setSuggestIndex(0);
+  }, []);
 
   const acceptSuggestion = useCallback(
     (textarea: HTMLTextAreaElement, suggestion: EditorSuggestion) => {
@@ -479,8 +531,6 @@ function TargetEditor({
   // the flush/debounce callbacks (which outlive renders) read live values.
   const draftRef = useRef(draft);
   draftRef.current = draft;
-  const segmentRef = useRef(segment);
-  segmentRef.current = segment;
   const onSaveDraftRef = useRef(onSaveDraft);
   onSaveDraftRef.current = onSaveDraft;
   // The last text handed off for persistence (or seeded from the committed
@@ -664,12 +714,13 @@ function TargetEditor({
         ref={textareaRef}
         value={draft}
         autoFocus
-        aria-autocomplete={suggestions ? "list" : undefined}
-        aria-expanded={suggestions ? suggestOpen : undefined}
+        aria-autocomplete={onRequestSuggestions ? "list" : undefined}
+        aria-expanded={onRequestSuggestions ? suggestOpen : undefined}
         onChange={(event) => {
           setDraft(event.target.value);
           reportCaret();
           if (!composingRef.current) {
+            requestCandidates();
             refreshSuggestAnchor(event.target);
           }
         }}
@@ -701,6 +752,7 @@ function TargetEditor({
           // Text committed by the IME must reach the debounced draft save
           // even when no further input follows.
           setSaveTick((tick) => tick + 1);
+          requestCandidates();
           refreshSuggestAnchor(event.currentTarget);
         }}
         onKeyDown={(event) => {
@@ -710,8 +762,7 @@ function TargetEditor({
             // segment.
             return;
           }
-          const plain =
-            !event.ctrlKey && !event.metaKey && !event.altKey;
+          const plain = !event.ctrlKey && !event.metaKey && !event.altKey;
           if (suggestOpen && plain) {
             // The popup owns ↑/↓/Enter/Tab/Esc while it is open; the
             // confirm chords keep Ctrl/Cmd so they are never shadowed.
@@ -760,7 +811,11 @@ function TargetEditor({
         }}
       />
       {suggestOpen ? (
-        <div className="segment-grid__suggest" role="listbox" aria-label="自动建议">
+        <div
+          className="segment-grid__suggest"
+          role="listbox"
+          aria-label="自动建议"
+        >
           {suggestMatches.map((suggestion, index) => (
             <button
               type="button"
@@ -813,8 +868,9 @@ export function SegmentGrid({
   onClearTarget,
   onToggleLock,
   onUpdateSource,
+  onContextMenuRequest,
   onCaretChange,
-  suggestions,
+  onRequestSuggestions,
   autoSaveDelayMs = AUTO_SAVE_DELAY_MS,
   ref,
 }: SegmentGridProps) {
@@ -840,9 +896,6 @@ export function SegmentGrid({
   const [menuSegmentId, setMenuSegmentId] = useState<string | null>(null);
   // Row whose source cell is being edited (one at a time, like the target).
   const [sourceEditingId, setSourceEditingId] = useState<string | null>(null);
-
-  const activeSegment =
-    segments.find((segment) => segment.id === activeSegmentId) ?? null;
 
   const handleEditorExit = useCallback(() => {
     pendingRowFocusRef.current = true;
@@ -1190,9 +1243,25 @@ export function SegmentGrid({
                 }}
                 onKeyDown={(event) => handleRowKeyDown(event, segment)}
                 onContextMenu={(event) => {
+                  // Editable fields keep the platform editing menu (cut/
+                  // copy/paste), popped natively by the main process.
+                  const target = event.target;
+                  if (
+                    target instanceof Element &&
+                    target.closest("textarea, input")
+                  ) {
+                    return;
+                  }
                   event.preventDefault();
                   onSelect(segment.id);
-                  setMenuSegmentId(segment.id);
+                  const handledNatively =
+                    onContextMenuRequest?.(segment, {
+                      x: event.clientX,
+                      y: event.clientY,
+                    }) === true;
+                  if (!handledNatively) {
+                    setMenuSegmentId(segment.id);
+                  }
                 }}
               >
                 <td className="segment-grid__ordinal">{segment.ordinal + 1}</td>
@@ -1228,7 +1297,7 @@ export function SegmentGrid({
                       onSaveDraft={onSaveDraft}
                       onConfirm={onConfirm}
                       onCaretChange={onCaretChange}
-                      suggestions={suggestions}
+                      onRequestSuggestions={onRequestSuggestions}
                       onExit={handleEditorExit}
                       editorRef={editorHandleRef}
                     />

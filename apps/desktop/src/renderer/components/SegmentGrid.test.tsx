@@ -98,7 +98,10 @@ describe("SegmentGrid", () => {
     // Bug report: segment 48 holds "240"; clicking the empty segment 66
     // flashed "240" inside 66's editor for one frame before it cleared.
     const paints: string[] = [];
-    const rows = [segment("s48", 47, "测温", "240"), segment("s66", 65, "色板")];
+    const rows = [
+      segment("s48", 47, "测温", "240"),
+      segment("s66", 65, "色板"),
+    ];
     const shared = {
       segments: rows,
       qaSegmentIds: new Set<string>(),
@@ -194,28 +197,36 @@ describe("SegmentGrid", () => {
   });
 
   it("offers prefix-filtered AutoSuggest candidates and accepts with Enter", async () => {
-    const onSaveDraft = vi.fn();
+    const onRequestSuggestions = vi.fn(() =>
+      Promise.resolve([
+        { text: "温度测量范围", kind: "tm" as const },
+        { text: "Temperature", kind: "term" as const },
+        { text: "150", kind: "number" as const },
+      ]),
+    );
     render(
       <SegmentGrid
         segments={[segment("s1", 0, "Temperature range -20°C~150°C.")]}
         activeSegmentId="s1"
         qaSegmentIds={new Set()}
         onSelect={vi.fn()}
-        onSaveDraft={onSaveDraft}
+        onSaveDraft={vi.fn()}
         onConfirm={vi.fn()}
-        suggestions={[
-          { text: "温度测量范围", kind: "tm" },
-          { text: "Temperature", kind: "term" },
-          { text: "150", kind: "number" },
-        ]}
+        onRequestSuggestions={onRequestSuggestions}
       />,
     );
     const editor = screen.getByLabelText("句段 1 译文");
+    // Candidates are fetched lazily: nothing before the first keystroke.
+    expect(onRequestSuggestions).not.toHaveBeenCalled();
     await userEvent.type(editor, "Temp");
+    // One fetch per editing session, regardless of keystroke count.
+    expect(onRequestSuggestions).toHaveBeenCalledTimes(1);
     // Prefix "Temp" matches only the term candidate.
-    const option = screen.getByRole("option", { name: /Temperature/ });
+    const option = await screen.findByRole("option", { name: /Temperature/ });
     expect(option).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: /150/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: /150/ }),
+    ).not.toBeInTheDocument();
     fireEvent.keyDown(editor, { key: "Enter" });
     expect(editor).toHaveValue("Temperature");
     // Accepting closed the popup.
@@ -231,14 +242,17 @@ describe("SegmentGrid", () => {
         onSelect={vi.fn()}
         onSaveDraft={vi.fn()}
         onConfirm={vi.fn()}
-        suggestions={[
-          { text: "240×240", kind: "tm" },
-          { text: "240", kind: "number" },
-        ]}
+        onRequestSuggestions={() =>
+          Promise.resolve<{ text: string; kind: "tm" | "term" | "number" }[]>([
+            { text: "240×240", kind: "tm" },
+            { text: "240", kind: "number" },
+          ])
+        }
       />,
     );
     const editor = screen.getByLabelText("句段 1 译文");
     await userEvent.type(editor, "24");
+    await screen.findByRole("listbox");
     expect(screen.getAllByRole("option")).toHaveLength(2);
     fireEvent.keyDown(editor, { key: "ArrowDown" });
     fireEvent.keyDown(editor, { key: "Enter" });
@@ -249,6 +263,65 @@ describe("SegmentGrid", () => {
     fireEvent.keyDown(editor, { key: "Escape" });
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     expect(screen.getByLabelText("句段 1 译文")).toBeInTheDocument();
+  });
+
+  it("prefers the native context menu and suppresses the DOM fallback", () => {
+    const onContextMenuRequest = vi.fn(() => true);
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "Hello.", "你好。")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onCopySource={vi.fn()}
+        onContextMenuRequest={onContextMenuRequest}
+      />,
+    );
+    fireEvent.contextMenu(screen.getByText("Hello."));
+    expect(onContextMenuRequest).toHaveBeenCalledTimes(1);
+    const [seg] = onContextMenuRequest.mock.calls[0] as unknown as [Segment];
+    expect(seg.id).toBe("s1");
+    // Handled natively: the grid's own DOM menu must not stack on top.
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the DOM row menu when no native menu is available", () => {
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "Hello.", "你好。")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onCopySource={vi.fn()}
+        onContextMenuRequest={() => false}
+      />,
+    );
+    fireEvent.contextMenu(screen.getByText("Hello."));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
+
+  it("leaves right-clicks inside the target editor to the native editing menu", () => {
+    const onContextMenuRequest = vi.fn(() => true);
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "Hello.", "你好。")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        onContextMenuRequest={onContextMenuRequest}
+      />,
+    );
+    fireEvent.contextMenu(screen.getByLabelText("句段 1 译文"));
+    // The main process pops the platform editing menu for editable fields;
+    // the row menu must not fire at all.
+    expect(onContextMenuRequest).not.toHaveBeenCalled();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
   it("renders no per-row save/confirm buttons in the active row", () => {

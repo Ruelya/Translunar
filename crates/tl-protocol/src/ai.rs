@@ -395,3 +395,139 @@ pub struct AgentStepNotification {
     pub run_status: AgentRunStatus,
     pub step: AgentStep,
 }
+
+// ---------------------------------------------------------------------------
+// The whole-document agent harness (`ai.harness.*`).
+//
+// Where `ai.agent.*` is a segment-batch pipeline (TM pretranslation plus
+// per-segment drafting fan-out — the MT shape), the harness runs one LLM
+// conversation that drives a tool loop over the whole document: it reads
+// segments in windows, looks up TM and terminology, writes drafts through
+// the same guards as the batch agent, keeps its own notes, runs QA, and
+// optionally fetches web pages. Design: docs/agent-harness.md.
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessStartParams {
+    pub document_id: String,
+    /// The task brief. Optional: the default brief is "translate this
+    /// document" with the project's language pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
+    /// Profile to drive the conversation; the default profile when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    /// Model/tool turns before the honest circuit breaker trips.
+    /// Default 24, cap 64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    /// Enables the `web_fetch` tool for this run. Off by default: network
+    /// reach is an explicit human decision, never an ambient capability.
+    #[serde(default)]
+    pub web_access: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessStatusParams {
+    pub harness_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessCancelParams {
+    pub harness_id: String,
+}
+
+/// Lifecycle of one harness run. Like the batch agent, the run never
+/// confirms and never exports: every terminal state leaves drafts (if any)
+/// parked at the human review gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum HarnessRunStatus {
+    Running,
+    /// Terminal: the model finished (or the turn budget ran out); drafts
+    /// are in the grid awaiting a human.
+    AwaitingReview,
+    Failed,
+    Canceled,
+}
+
+impl HarnessRunStatus {
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum HarnessStepKind {
+    /// One model turn (the reply's tool call, or the parse failure).
+    Model,
+    /// A tool executed on the engine thread (read/lookup/qa/term).
+    Tool,
+    /// `write_draft` landed (or was refused by a guard).
+    Draft,
+    /// The model appended to its run notes.
+    Note,
+    /// A `qa_run` tool call.
+    Qa,
+    /// A `web_fetch` performed by the worker.
+    Web,
+    Summary,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessStep {
+    pub index: u32,
+    pub kind: HarnessStepKind,
+    pub status: AgentStepStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<String>,
+    pub detail: String,
+}
+
+/// The observable state of one harness run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessRunView {
+    pub harness_id: String,
+    pub project_id: String,
+    pub document_id: String,
+    pub status: HarnessRunStatus,
+    pub instruction: String,
+    pub profile_id: String,
+    pub provider: AiProviderKind,
+    pub model: String,
+    pub web_access: bool,
+    pub max_turns: u32,
+    pub turns_used: u32,
+    pub cancel_requested: bool,
+    /// Drafts written through `write_draft` (guards passed).
+    pub drafted_segments: u32,
+    /// Term entries written through `term_add`.
+    pub terms_added: u32,
+    /// The model's own scratchpad, in order. Never pruned by the budget.
+    pub notes: Vec<String>,
+    /// Present when terminal via `finish` (or the turn budget note).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Present exactly when `status` is `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub steps: Vec<HarnessStep>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+/// Payload for the reserved `notify.ai.harness.step` frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessStepNotification {
+    pub harness_id: String,
+    pub document_id: String,
+    pub run_status: HarnessRunStatus,
+    pub step: HarnessStep,
+}

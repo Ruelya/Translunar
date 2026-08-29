@@ -39,4 +39,39 @@ pub enum EngineEvent {
         assist_id: String,
         outcome: Result<AssistCompletion, String>,
     },
+    /// Harness worker asks the engine to run one local tool. The engine
+    /// executes it between loop inputs and answers over the run's reply
+    /// channel (see `HarnessRunState.tool_tx`).
+    HarnessTool {
+        harness_id: String,
+        tool: String,
+        args: serde_json::Value,
+    },
+    /// A worker-side step worth surfacing (model turn, web fetch, parse
+    /// retry). Pure telemetry: no engine state changes.
+    HarnessTrace {
+        harness_id: String,
+        kind: HarnessTraceKind,
+        ok: bool,
+        detail: String,
+    },
+    /// The model called `finish` (or the turn budget ran out with
+    /// `exhausted`); drafts stay parked at the human review gate.
+    HarnessFinished {
+        harness_id: String,
+        summary: String,
+        exhausted: bool,
+    },
+    /// The conversation could not continue (provider failure or an
+    /// unparseable reply after the retry). Reported verbatim.
+    HarnessFailed { harness_id: String, error: String },
+    /// The cancel flag was observed; the run turns canceled.
+    HarnessCanceled { harness_id: String },
+}
+
+/// What a [`EngineEvent::HarnessTrace`] describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessTraceKind {
+    Model,
+    Web,
 }

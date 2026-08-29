@@ -1796,6 +1796,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

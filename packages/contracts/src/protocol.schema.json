@@ -1238,6 +1238,294 @@
         "protocolVersion"
       ]
     },
+    "HarnessCancelParams": {
+      "type": "object",
+      "properties": {
+        "harnessId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "harnessId"
+      ]
+    },
+    "HarnessRunStatus": {
+      "description": "Lifecycle of one harness run. Like the batch agent, the run never\nconfirms and never exports: every terminal state leaves drafts (if any)\nparked at the human review gate.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "running",
+            "failed",
+            "canceled"
+          ]
+        },
+        {
+          "description": "Terminal: the model finished (or the turn budget ran out); drafts\nare in the grid awaiting a human.",
+          "type": "string",
+          "const": "awaitingReview"
+        }
+      ]
+    },
+    "HarnessRunView": {
+      "description": "The observable state of one harness run.",
+      "type": "object",
+      "properties": {
+        "cancelRequested": {
+          "type": "boolean"
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "documentId": {
+          "type": "string"
+        },
+        "draftedSegments": {
+          "description": "Drafts written through `write_draft` (guards passed).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "errorMessage": {
+          "description": "Present exactly when `status` is `failed`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "harnessId": {
+          "type": "string"
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "maxTurns": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "model": {
+          "type": "string"
+        },
+        "notes": {
+          "description": "The model's own scratchpad, in order. Never pruned by the budget.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "profileId": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "provider": {
+          "$ref": "#/$defs/AiProviderKind"
+        },
+        "status": {
+          "$ref": "#/$defs/HarnessRunStatus"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HarnessStep"
+          }
+        },
+        "summary": {
+          "description": "Present when terminal via `finish` (or the turn budget note).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "termsAdded": {
+          "description": "Term entries written through `term_add`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "turnsUsed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "updatedAtMs": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "webAccess": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "harnessId",
+        "projectId",
+        "documentId",
+        "status",
+        "instruction",
+        "profileId",
+        "provider",
+        "model",
+        "webAccess",
+        "maxTurns",
+        "turnsUsed",
+        "cancelRequested",
+        "draftedSegments",
+        "termsAdded",
+        "notes",
+        "steps",
+        "createdAtMs",
+        "updatedAtMs"
+      ]
+    },
+    "HarnessStartParams": {
+      "type": "object",
+      "properties": {
+        "documentId": {
+          "type": "string"
+        },
+        "instruction": {
+          "description": "The task brief. Optional: the default brief is \"translate this\ndocument\" with the project's language pair.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maxTurns": {
+          "description": "Model/tool turns before the honest circuit breaker trips.\nDefault 24, cap 64.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "profileId": {
+          "description": "Profile to drive the conversation; the default profile when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "webAccess": {
+          "description": "Enables the `web_fetch` tool for this run. Off by default: network\nreach is an explicit human decision, never an ambient capability.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "documentId"
+      ]
+    },
+    "HarnessStatusParams": {
+      "type": "object",
+      "properties": {
+        "harnessId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "harnessId"
+      ]
+    },
+    "HarnessStep": {
+      "type": "object",
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "kind": {
+          "$ref": "#/$defs/HarnessStepKind"
+        },
+        "segmentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/AgentStepStatus"
+        }
+      },
+      "required": [
+        "index",
+        "kind",
+        "status",
+        "detail"
+      ]
+    },
+    "HarnessStepKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "summary",
+            "cancel"
+          ]
+        },
+        {
+          "description": "One model turn (the reply's tool call, or the parse failure).",
+          "type": "string",
+          "const": "model"
+        },
+        {
+          "description": "A tool executed on the engine thread (read/lookup/qa/term).",
+          "type": "string",
+          "const": "tool"
+        },
+        {
+          "description": "`write_draft` landed (or was refused by a guard).",
+          "type": "string",
+          "const": "draft"
+        },
+        {
+          "description": "The model appended to its run notes.",
+          "type": "string",
+          "const": "note"
+        },
+        {
+          "description": "A `qa_run` tool call.",
+          "type": "string",
+          "const": "qa"
+        },
+        {
+          "description": "A `web_fetch` performed by the worker.",
+          "type": "string",
+          "const": "web"
+        }
+      ]
+    },
+    "HarnessStepNotification": {
+      "description": "Payload for the reserved `notify.ai.harness.step` frame.",
+      "type": "object",
+      "properties": {
+        "documentId": {
+          "type": "string"
+        },
+        "harnessId": {
+          "type": "string"
+        },
+        "runStatus": {
+          "$ref": "#/$defs/HarnessRunStatus"
+        },
+        "step": {
+          "$ref": "#/$defs/HarnessStep"
+        }
+      },
+      "required": [
+        "harnessId",
+        "documentId",
+        "runStatus",
+        "step"
+      ]
+    },
     "InitializeParams": {
       "type": "object",
       "properties": {
@@ -2606,6 +2894,57 @@
         "result"
       ]
     },
+    "MethodContract63": {
+      "description": "A `{ params, result }` pair for one method. Only used for schema export.",
+      "type": "object",
+      "properties": {
+        "params": {
+          "$ref": "#/$defs/HarnessStartParams"
+        },
+        "result": {
+          "$ref": "#/$defs/HarnessRunView"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "params",
+        "result"
+      ]
+    },
+    "MethodContract64": {
+      "description": "A `{ params, result }` pair for one method. Only used for schema export.",
+      "type": "object",
+      "properties": {
+        "params": {
+          "$ref": "#/$defs/HarnessStatusParams"
+        },
+        "result": {
+          "$ref": "#/$defs/HarnessRunView"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "params",
+        "result"
+      ]
+    },
+    "MethodContract65": {
+      "description": "A `{ params, result }` pair for one method. Only used for schema export.",
+      "type": "object",
+      "properties": {
+        "params": {
+          "$ref": "#/$defs/HarnessCancelParams"
+        },
+        "result": {
+          "$ref": "#/$defs/HarnessRunView"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "params",
+        "result"
+      ]
+    },
     "MethodContract7": {
       "description": "A `{ params, result }` pair for one method. Only used for schema export.",
       "type": "object",
@@ -2664,6 +3003,9 @@
         "notify.ai.agent.step": {
           "$ref": "#/$defs/AgentStepNotification"
         },
+        "notify.ai.harness.step": {
+          "$ref": "#/$defs/HarnessStepNotification"
+        },
         "notify.engine.ready": {
           "$ref": "#/$defs/EngineReadyNotification"
         }
@@ -2671,7 +3013,8 @@
       "additionalProperties": false,
       "required": [
         "notify.engine.ready",
-        "notify.ai.agent.step"
+        "notify.ai.agent.step",
+        "notify.ai.harness.step"
       ]
     },
     "NumberEvidence": {
@@ -3590,6 +3933,15 @@
         "ai.configure": {
           "$ref": "#/$defs/MethodContract51"
         },
+        "ai.harness.cancel": {
+          "$ref": "#/$defs/MethodContract65"
+        },
+        "ai.harness.start": {
+          "$ref": "#/$defs/MethodContract63"
+        },
+        "ai.harness.status": {
+          "$ref": "#/$defs/MethodContract64"
+        },
         "ai.profile.add": {
           "$ref": "#/$defs/MethodContract53"
         },
@@ -3816,7 +4168,10 @@
         "ai.agent.start",
         "ai.agent.status",
         "ai.agent.review",
-        "ai.agent.cancel"
+        "ai.agent.cancel",
+        "ai.harness.start",
+        "ai.harness.status",
+        "ai.harness.cancel"
       ]
     },
     "RpcNotification": {

@@ -15,6 +15,7 @@ mod assets;
 mod assist;
 mod events;
 mod export;
+mod harness;
 mod import;
 mod memories;
 mod qacheck;
@@ -47,13 +48,15 @@ use tl_protocol::{
     AiProfileRemoveParams, AiProfileView, AiProviderKind, AiStatusResult, DocumentExportParams,
     DocumentExportResult, DocumentImportParams, DocumentImportResult, DocumentListParams,
     DocumentListResult, DocumentProgress, DocumentRemoveParams, DocumentRemoveResult,
-    EngineCapabilities, EngineReadyNotification, InitializeParams, InitializeResult,
-    PROTOCOL_VERSION, ProjectArchiveParams, ProjectCreateParams, ProjectGetParams,
-    ProjectListResult, ProjectUpdateParams, QaRunParams, RpcError, RpcErrorCode, RpcNotification,
-    RpcRequest, RpcResponse, SegmentConfirmParams, SegmentConfirmResult, SegmentListParams,
-    SegmentListResult, SegmentLockParams, SegmentLockResult, SegmentReplaceParams,
-    SegmentReplaceResult, SegmentUpdateParams, SegmentUpdateResult, SegmentUpdateSourceParams,
-    SegmentUpdateSourceResult, ShutdownResult, methods, notifications,
+    EngineCapabilities, EngineReadyNotification, HarnessCancelParams, HarnessRunStatus,
+    HarnessRunView, HarnessStartParams, HarnessStatusParams, HarnessStep, HarnessStepKind,
+    HarnessStepNotification, InitializeParams, InitializeResult, PROTOCOL_VERSION,
+    ProjectArchiveParams, ProjectCreateParams, ProjectGetParams, ProjectListResult,
+    ProjectUpdateParams, QaRunParams, RpcError, RpcErrorCode, RpcNotification, RpcRequest,
+    RpcResponse, SegmentConfirmParams, SegmentConfirmResult, SegmentListParams, SegmentListResult,
+    SegmentLockParams, SegmentLockResult, SegmentReplaceParams, SegmentReplaceResult,
+    SegmentUpdateParams, SegmentUpdateResult, SegmentUpdateSourceParams, SegmentUpdateSourceResult,
+    ShutdownResult, TermAddParams, TermLookupParams, TmLookupParams, methods, notifications,
 };
 use tl_segmentation::{SegmentationMode, SrxRules};
 
@@ -81,6 +84,11 @@ const MAX_AI_PROFILES: usize = 6;
 /// total thread and provider load. Hitting it is an honest Conflict, not a
 /// queue.
 const AGENT_MAX_CONCURRENT_RUNS: usize = 4;
+/// Harness runs are heavier than batch runs (one long conversation each);
+/// two in flight is plenty for a desktop.
+const HARNESS_MAX_CONCURRENT_RUNS: usize = 2;
+/// Terminal harness runs kept for status polling before pruning.
+const HARNESS_TERMINAL_HISTORY: usize = 8;
 /// Terminal assist runs kept for late status polls before being pruned.
 const ASSIST_TERMINAL_HISTORY: usize = 16;
 /// Terminal agent runs kept for late status polls before being pruned.
@@ -151,6 +159,15 @@ struct AgentRunState {
     cancel: Arc<AtomicBool>,
 }
 
+/// In-flight or finished harness run bookkeeping. The conversation lives on
+/// the worker thread; the engine holds the observable view, the cancel flag,
+/// and the reply channel its tool executor answers on.
+struct HarnessRunState {
+    view: HarnessRunView,
+    cancel: Arc<AtomicBool>,
+    tool_tx: Sender<String>,
+}
+
 /// In-flight or finished assist request bookkeeping. Lives in engine memory
 /// only; assist never writes segments, so there is nothing to persist.
 struct AssistRunState {
@@ -188,6 +205,7 @@ pub struct Engine {
     /// on the store's unique `(memory_id, source_hash)` index.
     tm_indexes: BTreeMap<String, TmIndex>,
     agent_runs: BTreeMap<String, AgentRunState>,
+    harness_runs: BTreeMap<String, HarnessRunState>,
     assist_runs: BTreeMap<String, AssistRunState>,
     events_tx: Sender<EngineEvent>,
     events_rx: Option<Receiver<EngineEvent>>,
@@ -307,6 +325,7 @@ impl Engine {
             ai_default_profile: None,
             tm_indexes,
             agent_runs: BTreeMap::new(),
+            harness_runs: BTreeMap::new(),
             assist_runs: BTreeMap::new(),
             events_tx,
             events_rx: Some(events_rx),
@@ -412,6 +431,9 @@ impl Engine {
             methods::AI_ASSIST_STATUS => to_value(self.ai_assist_status(parse(params)?)?),
             methods::AI_ASSIST_CANCEL => to_value(self.ai_assist_cancel(parse(params)?)?),
             methods::AI_AGENT_START => to_value(self.ai_agent_start(parse(params)?, notify)?),
+            methods::AI_HARNESS_START => to_value(self.ai_harness_start(parse(params)?, notify)?),
+            methods::AI_HARNESS_STATUS => to_value(self.ai_harness_status(parse(params)?)?),
+            methods::AI_HARNESS_CANCEL => to_value(self.ai_harness_cancel(parse(params)?)?),
             methods::AI_AGENT_STATUS => to_value(self.ai_agent_status(parse(params)?)?),
             methods::AI_AGENT_REVIEW => to_value(self.ai_agent_review(parse(params)?, notify)?),
             methods::AI_AGENT_CANCEL => to_value(self.ai_agent_cancel(parse(params)?)?),
@@ -2173,6 +2195,801 @@ impl Engine {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Whole-document harness (`ai.harness.*`) — docs/agent-harness.md.
+    // One LLM conversation drives a tool loop; local tools execute here on
+    // the engine thread, network stays on the worker.
+
+    /// Start a harness run: validate, build the system prompt from real
+    /// project data, spawn the conversation worker, return immediately.
+    fn ai_harness_start(
+        &mut self,
+        params: HarnessStartParams,
+        notify: &mut dyn FnMut(RpcNotification),
+    ) -> Result<HarnessRunView, EngineError> {
+        // Honest degradation: without a provider the run must not start.
+        let runtime = self.resolve_ai_profile(params.profile_id.as_deref())?;
+        if runtime.profile.kind == AiProviderKind::Deepl {
+            return Err(EngineError::InvalidParams(
+                "DeepL 是机器翻译接口，无法驱动 AGENT 工具循环；请配置聊天型模型".to_string(),
+            ));
+        }
+        let profile = runtime.profile.clone();
+        let credential = runtime.credential.duplicate();
+        if let Some(active) = self.harness_runs.values().find(|run| {
+            run.view.status == HarnessRunStatus::Running
+                && run.view.document_id == params.document_id
+        }) {
+            return Err(EngineError::Conflict(format!(
+                "harness run {} is still running on this document; cancel it or wait",
+                active.view.harness_id
+            )));
+        }
+        let running = self
+            .harness_runs
+            .values()
+            .filter(|run| run.view.status == HarnessRunStatus::Running)
+            .count();
+        if running >= HARNESS_MAX_CONCURRENT_RUNS {
+            return Err(EngineError::Conflict(format!(
+                "{running} harness runs are already in flight; wait or cancel one"
+            )));
+        }
+        let record = self.require_document(&params.document_id)?;
+        let project = self.require_project(&record.document.project_id)?.clone();
+        let document_id = record.document.id.clone();
+        let max_turns = params
+            .max_turns
+            .unwrap_or(harness::HARNESS_DEFAULT_MAX_TURNS)
+            .clamp(1, harness::HARNESS_MAX_TURNS_CAP);
+        let instruction = params
+            .instruction
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "将该文档从 {} 翻译到 {}，质量优先，保持全文术语与风格一致。",
+                    project.source_locale, project.target_locale
+                )
+            });
+        let system_prompt =
+            self.harness_system_prompt(&project, &document_id, params.web_access)?;
+        let messages = vec![
+            tl_ai::AiMessage {
+                role: tl_ai::AiMessageRole::System,
+                text: system_prompt,
+            },
+            tl_ai::AiMessage {
+                role: tl_ai::AiMessageRole::User,
+                text: format!("任务：{instruction}\n请先调用 overview 了解现状，再开始工作。"),
+            },
+        ];
+        let (tool_tx, tool_rx) = std::sync::mpsc::channel::<String>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let now = now_ms();
+        let mut view = HarnessRunView {
+            harness_id: new_id(),
+            project_id: project.id.clone(),
+            document_id: document_id.clone(),
+            status: HarnessRunStatus::Running,
+            instruction: instruction.clone(),
+            profile_id: profile.id.clone(),
+            provider: profile.kind,
+            model: profile.model.clone(),
+            web_access: params.web_access,
+            max_turns,
+            turns_used: 0,
+            cancel_requested: false,
+            drafted_segments: 0,
+            terms_added: 0,
+            notes: Vec::new(),
+            summary: None,
+            error_message: None,
+            steps: Vec::new(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        push_harness_step(
+            &mut view,
+            notify,
+            HarnessStepKind::Summary,
+            AgentStepStatus::Done,
+            None,
+            format!(
+                "运行开始：{}（{} 轮预算，网络访问{}）",
+                instruction,
+                max_turns,
+                if params.web_access {
+                    "已开启"
+                } else {
+                    "关闭"
+                }
+            ),
+        );
+        harness::spawn_worker(harness::HarnessJob {
+            harness_id: view.harness_id.clone(),
+            messages,
+            profile,
+            credential,
+            cancel: Arc::clone(&cancel),
+            events: self.events_tx.clone(),
+            tool_replies: tool_rx,
+            max_turns,
+            web_access: params.web_access,
+            char_budget: harness::HARNESS_CHAR_BUDGET,
+        });
+        let harness_id = view.harness_id.clone();
+        self.harness_runs.insert(
+            harness_id,
+            HarnessRunState {
+                view: view.clone(),
+                cancel,
+                tool_tx,
+            },
+        );
+        self.prune_harness_runs();
+        Ok(view)
+    }
+
+    /// The system prompt: identity, hard rules, the tool protocol, the
+    /// project card, and the first page of the document map — every line
+    /// built from real engine data, nothing invented.
+    fn harness_system_prompt(
+        &mut self,
+        project: &Project,
+        document_id: &str,
+        web_access: bool,
+    ) -> Result<String, EngineError> {
+        let rows = self.store.document_segments_page(document_id, 0, None)?;
+        let total = rows.len();
+        let mut untranslated = 0usize;
+        let mut draft = 0usize;
+        let mut confirmed = 0usize;
+        let mut locked = 0usize;
+        for row in &rows {
+            match row.state {
+                SegmentState::Untranslated => untranslated += 1,
+                SegmentState::Draft => draft += 1,
+                SegmentState::Confirmed => confirmed += 1,
+            }
+            if row.locked {
+                locked += 1;
+            }
+        }
+        let memories: Vec<String> = self
+            .enabled_memory_mounts(&project.id)
+            .into_iter()
+            .map(|mount| {
+                let name = self
+                    .state
+                    .memories
+                    .get(&mount.memory_id)
+                    .map(|memory| memory.name.as_str())
+                    .unwrap_or(mount.memory_id.as_str());
+                format!("{name}（{}）", if mount.writable { "可写" } else { "只读" })
+            })
+            .collect();
+        let termbases: Vec<String> = self
+            .state
+            .termbase_mounts
+            .iter()
+            .filter(|mount| mount.project_id == project.id)
+            .map(|mount| {
+                let name = self
+                    .state
+                    .termbases
+                    .get(&mount.termbase_id)
+                    .map(|termbase| termbase.name.as_str())
+                    .unwrap_or(mount.termbase_id.as_str());
+                format!("{name}（id: {}）", mount.termbase_id)
+            })
+            .collect();
+        let map_lines: Vec<String> = rows
+            .iter()
+            .take(100)
+            .map(|row| {
+                let state = match row.state {
+                    SegmentState::Untranslated => "未译",
+                    SegmentState::Draft => "草稿",
+                    SegmentState::Confirmed => "已确认",
+                };
+                let lock = if row.locked { "·锁定" } else { "" };
+                let excerpt: String = row.source_text.chars().take(60).collect();
+                format!("#{} [{}{}] {}", row.ordinal + 1, state, lock, excerpt)
+            })
+            .collect();
+        Ok(format!(
+            "你是 Translunar CAT 中的翻译智能体，负责整篇文档的高质量翻译。\n\
+             你通过工具操作真实的翻译项目；确认与导出永远由人工完成，你的译文一律以草稿落格。\n\
+             \n\
+             硬规则：\n\
+             1. 每轮只输出一个 JSON 工具调用：{{\"tool\":\"…\",\"args\":{{…}}}}，不得输出任何其他文字。\n\
+             2. 源文中的占位符与内联标签（如 {{name}}、<b>）必须原样出现在译文中；破坏标签的草稿会被引擎拒绝。\n\
+             3. 术语以挂载术语库为准（term_lookup）；全文术语必须一致，发现新的关键术语可用 term_add 收录。\n\
+             4. 没有把握的句段：跳过并用 note 记录原因，绝不编造。\n\
+             5. 上下文有预算：用 read_segments 分批读（每次 ≤50 段），把阶段性结论写入 note——笔记永不被裁剪，对话历史可能被裁剪。\n\
+             6. 已锁定或已确认的句段不可写。翻译前先看清段的状态。\n\
+             7. 工作完成（或无事可做）时调用 finish 并给出中文总结。\n\
+             \n\
+             工具：\n\
+             - overview {{}} —— 项目与文档现状（统计、挂载库、文档地图首页）\n\
+             - read_segments {{\"offset\":0,\"limit\":30}} —— 按序号窗口读句段\n\
+             - write_draft {{\"ordinal\":N,\"targetText\":\"…\"}} —— 写一段译文草稿（也接受 segmentId）\n\
+             - tm_lookup {{\"text\":\"…\"}} —— 查翻译记忆（精确+模糊）\n\
+             - term_lookup {{\"text\":\"…\"}} —— 查源文中的术语命中\n\
+             - term_add {{\"termbaseId\":\"…\",\"sourceTerm\":\"…\",\"targetTerm\":\"…\"}} —— 收录术语\n\
+             - qa_run {{}} —— 运行文档 QA 并取摘要\n\
+             - note {{\"text\":\"…\"}} —— 追加运行笔记（scratchpad）\n\
+             - web_fetch {{\"url\":\"https://…\"}} —— 抓取网页正文（本次运行{web}）\n\
+             - finish {{\"summary\":\"…\"}} —— 结束运行\n\
+             \n\
+             项目卡片：\n\
+             - 项目：{name}（{source} → {target}）\n\
+             - 句段：共 {total}，未译 {untranslated}，草稿 {draft}，已确认 {confirmed}，锁定 {locked}\n\
+             - 记忆库：{memories}\n\
+             - 术语库：{termbases}\n\
+             \n\
+             文档地图（前 100 段，完整源文用 read_segments 获取）：\n{map}",
+            web = if web_access {
+                "已开启"
+            } else {
+                "未开启，调用会被拒绝"
+            },
+            name = project.name,
+            source = project.source_locale,
+            target = project.target_locale,
+            total = total,
+            untranslated = untranslated,
+            draft = draft,
+            confirmed = confirmed,
+            locked = locked,
+            memories = if memories.is_empty() {
+                "无".to_string()
+            } else {
+                memories.join("、")
+            },
+            termbases = if termbases.is_empty() {
+                "无（term_add 不可用）".to_string()
+            } else {
+                termbases.join("、")
+            },
+            map = map_lines.join("\n"),
+        ))
+    }
+
+    fn ai_harness_status(
+        &self,
+        params: HarnessStatusParams,
+    ) -> Result<HarnessRunView, EngineError> {
+        self.harness_runs
+            .get(&params.harness_id)
+            .map(|run| run.view.clone())
+            .ok_or_else(|| EngineError::NotFound(format!("harness run {}", params.harness_id)))
+    }
+
+    /// Request cancellation: the worker observes the flag at the next turn
+    /// boundary (or inside the provider call's poll interval). Drafts
+    /// already written stay in the grid.
+    fn ai_harness_cancel(
+        &mut self,
+        params: HarnessCancelParams,
+    ) -> Result<HarnessRunView, EngineError> {
+        let run = self
+            .harness_runs
+            .get_mut(&params.harness_id)
+            .ok_or_else(|| EngineError::NotFound(format!("harness run {}", params.harness_id)))?;
+        if run.view.status == HarnessRunStatus::Running {
+            run.cancel.store(true, Ordering::Relaxed);
+            run.view.cancel_requested = true;
+            run.view.updated_at_ms = now_ms();
+        }
+        Ok(run.view.clone())
+    }
+
+    /// Same pruning idea as the batch agent: keep a bounded history of
+    /// terminal runs, never drop a running one.
+    fn prune_harness_runs(&mut self) {
+        let mut terminal: Vec<(i64, String)> = self
+            .harness_runs
+            .values()
+            .filter(|run| run.view.status.is_terminal())
+            .map(|run| (run.view.updated_at_ms, run.view.harness_id.clone()))
+            .collect();
+        if terminal.len() <= HARNESS_TERMINAL_HISTORY {
+            return;
+        }
+        terminal.sort();
+        for (_, harness_id) in &terminal[..terminal.len() - HARNESS_TERMINAL_HISTORY] {
+            self.harness_runs.remove(harness_id);
+        }
+    }
+
+    /// One tool request from the harness worker. The run state is lifted
+    /// out of the map so the tool arms can use `&mut self` (store writes,
+    /// QA refresh) while mutating the view; the loop is single-threaded, so
+    /// nothing observes the gap. The reply channel is always answered —
+    /// a silent engine would hang the worker.
+    fn harness_tool(
+        &mut self,
+        harness_id: String,
+        tool: String,
+        args: Value,
+        notify: &mut dyn FnMut(RpcNotification),
+    ) -> Result<(), EngineError> {
+        let running = self
+            .harness_runs
+            .get(&harness_id)
+            .is_some_and(|run| run.view.status == HarnessRunStatus::Running);
+        if !running {
+            if let Some(run) = self.harness_runs.get(&harness_id) {
+                let _ = run
+                    .tool_tx
+                    .send(r#"{"error":"run is not running"}"#.to_string());
+            }
+            return Ok(());
+        }
+        let mut state = self
+            .harness_runs
+            .remove(&harness_id)
+            .expect("run just resolved");
+        let (result, step) = self.execute_harness_tool(&mut state.view, &tool, &args);
+        let _ = state.tool_tx.send(result);
+        if let Some((kind, status, segment_id, detail)) = step {
+            push_harness_step(&mut state.view, notify, kind, status, segment_id, detail);
+        }
+        state.view.updated_at_ms = now_ms();
+        self.harness_runs.insert(harness_id, state);
+        Ok(())
+    }
+
+    /// Execute one local tool with real engine semantics. Returns the JSON
+    /// reply for the worker plus an optional observable step.
+    #[allow(clippy::type_complexity)]
+    fn execute_harness_tool(
+        &mut self,
+        view: &mut HarnessRunView,
+        tool: &str,
+        args: &Value,
+    ) -> (
+        String,
+        Option<(HarnessStepKind, AgentStepStatus, Option<String>, String)>,
+    ) {
+        let str_arg = |name: &str| -> Option<String> {
+            args.get(name)
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        };
+        match tool {
+            "overview" => {
+                let project = match self.require_project(&view.project_id) {
+                    Ok(project) => project.clone(),
+                    Err(error) => {
+                        return (
+                            serde_json::json!({"error": error.to_string()}).to_string(),
+                            None,
+                        );
+                    }
+                };
+                match self.harness_system_prompt(&project, &view.document_id, view.web_access) {
+                    // Reuse the prompt builder's project card + map; the
+                    // model reads the same truth either way.
+                    Ok(card) => {
+                        let body = card
+                            .split("项目卡片：")
+                            .nth(1)
+                            .map(|tail| format!("项目卡片：{tail}"))
+                            .unwrap_or(card);
+                        (
+                            serde_json::json!({ "overview": body }).to_string(),
+                            Some((
+                                HarnessStepKind::Tool,
+                                AgentStepStatus::Done,
+                                None,
+                                "overview：读取项目现状".to_string(),
+                            )),
+                        )
+                    }
+                    Err(error) => (
+                        serde_json::json!({"error": error.to_string()}).to_string(),
+                        None,
+                    ),
+                }
+            }
+            "read_segments" => {
+                let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30)
+                    .clamp(1, 50) as u32;
+                match self
+                    .store
+                    .document_segments_page(&view.document_id, offset, Some(limit))
+                {
+                    Ok(rows) => {
+                        let items: Vec<Value> = rows
+                            .iter()
+                            .map(|row| {
+                                serde_json::json!({
+                                    "segmentId": row.id,
+                                    "ordinal": row.ordinal + 1,
+                                    "state": match row.state {
+                                        SegmentState::Untranslated => "untranslated",
+                                        SegmentState::Draft => "draft",
+                                        SegmentState::Confirmed => "confirmed",
+                                    },
+                                    "locked": row.locked,
+                                    "source": row.source_text,
+                                    "target": row.target_text,
+                                })
+                            })
+                            .collect();
+                        (
+                            serde_json::json!({ "segments": items }).to_string(),
+                            Some((
+                                HarnessStepKind::Tool,
+                                AgentStepStatus::Done,
+                                None,
+                                format!("read_segments：#{}-#{}", offset + 1, offset + limit),
+                            )),
+                        )
+                    }
+                    Err(error) => (
+                        serde_json::json!({"error": error.to_string()}).to_string(),
+                        None,
+                    ),
+                }
+            }
+            "write_draft" => {
+                let Some(target_text) = str_arg("targetText") else {
+                    return (r#"{"error":"缺少 args.targetText"}"#.to_string(), None);
+                };
+                // Accept either the opaque id or the 1-based ordinal the
+                // document map displays — the model sees ordinals first.
+                let segment_id = match str_arg("segmentId") {
+                    Some(id) => id,
+                    None => {
+                        let Some(ordinal) = args.get("ordinal").and_then(|value| value.as_u64())
+                        else {
+                            return (
+                                r#"{"error":"需要 args.segmentId 或 args.ordinal"}"#.to_string(),
+                                None,
+                            );
+                        };
+                        if ordinal == 0 {
+                            return (r#"{"error":"ordinal 从 1 开始"}"#.to_string(), None);
+                        }
+                        match self.store.document_segments_page(
+                            &view.document_id,
+                            (ordinal - 1) as u32,
+                            Some(1),
+                        ) {
+                            Ok(rows) => match rows.into_iter().next() {
+                                Some(row) => row.id,
+                                None => {
+                                    return (
+                                        serde_json::json!({
+                                            "error": format!("句段 #{ordinal} 不存在")
+                                        })
+                                        .to_string(),
+                                        None,
+                                    );
+                                }
+                            },
+                            Err(error) => {
+                                return (
+                                    serde_json::json!({"error": error.to_string()}).to_string(),
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                };
+                self.harness_write_draft(view, &segment_id, &target_text)
+            }
+            "tm_lookup" => {
+                let Some(text) = str_arg("text") else {
+                    return (r#"{"error":"缺少 args.text"}"#.to_string(), None);
+                };
+                match self.tm_lookup(TmLookupParams {
+                    project_id: view.project_id.clone(),
+                    source_text: text,
+                    limit: Some(5),
+                    min_score: None,
+                }) {
+                    Ok(result) => {
+                        let matches: Vec<Value> = result
+                            .matches
+                            .iter()
+                            .map(|item| {
+                                serde_json::json!({
+                                    "score": item.score,
+                                    "source": item.entry.source_text,
+                                    "target": item.entry.target_text,
+                                })
+                            })
+                            .collect();
+                        (
+                            serde_json::json!({ "matches": matches }).to_string(),
+                            Some((
+                                HarnessStepKind::Tool,
+                                AgentStepStatus::Done,
+                                None,
+                                format!("tm_lookup：{} 条匹配", matches.len()),
+                            )),
+                        )
+                    }
+                    Err(error) => (
+                        serde_json::json!({"error": error.to_string()}).to_string(),
+                        None,
+                    ),
+                }
+            }
+            "term_lookup" => {
+                let Some(text) = str_arg("text") else {
+                    return (r#"{"error":"缺少 args.text"}"#.to_string(), None);
+                };
+                match self.term_lookup(TermLookupParams {
+                    project_id: view.project_id.clone(),
+                    source_text: text,
+                }) {
+                    Ok(result) => {
+                        let hits: Vec<Value> = result
+                            .matches
+                            .iter()
+                            .map(|hit| {
+                                let translations: Vec<Value> = hit
+                                    .translations
+                                    .iter()
+                                    .map(|translation| {
+                                        serde_json::json!({
+                                            "term": translation.term,
+                                            "locale": translation.locale,
+                                            "forbidden": translation.forbidden,
+                                        })
+                                    })
+                                    .collect();
+                                serde_json::json!({
+                                    "sourceTerm": hit.source_term,
+                                    "translations": translations,
+                                })
+                            })
+                            .collect();
+                        (
+                            serde_json::json!({ "hits": hits }).to_string(),
+                            Some((
+                                HarnessStepKind::Tool,
+                                AgentStepStatus::Done,
+                                None,
+                                format!("term_lookup：{} 个命中", hits.len()),
+                            )),
+                        )
+                    }
+                    Err(error) => (
+                        serde_json::json!({"error": error.to_string()}).to_string(),
+                        None,
+                    ),
+                }
+            }
+            "term_add" => {
+                let (Some(termbase_id), Some(source_term), Some(target_term)) = (
+                    str_arg("termbaseId"),
+                    str_arg("sourceTerm"),
+                    str_arg("targetTerm"),
+                ) else {
+                    return (
+                        r#"{"error":"需要 args.termbaseId / sourceTerm / targetTerm"}"#.to_string(),
+                        None,
+                    );
+                };
+                let target_locale = match self.require_project(&view.project_id) {
+                    Ok(project) => project.target_locale.clone(),
+                    Err(error) => {
+                        return (
+                            serde_json::json!({"error": error.to_string()}).to_string(),
+                            None,
+                        );
+                    }
+                };
+                match self.term_add(TermAddParams {
+                    termbase_id,
+                    source_term: source_term.clone(),
+                    target_term: target_term.clone(),
+                    target_locale,
+                    forbidden: false,
+                    definition: None,
+                    domain: None,
+                }) {
+                    Ok(_) => {
+                        view.terms_added += 1;
+                        (
+                            r#"{"ok":true}"#.to_string(),
+                            Some((
+                                HarnessStepKind::Tool,
+                                AgentStepStatus::Done,
+                                None,
+                                format!("term_add：{source_term} → {target_term}"),
+                            )),
+                        )
+                    }
+                    Err(error) => (
+                        serde_json::json!({"error": error.to_string()}).to_string(),
+                        Some((
+                            HarnessStepKind::Tool,
+                            AgentStepStatus::Failed,
+                            None,
+                            format!("term_add 被拒绝:{error}"),
+                        )),
+                    ),
+                }
+            }
+            "qa_run" => match self.qa_run(QaRunParams {
+                document_id: view.document_id.clone(),
+            }) {
+                Ok(result) => {
+                    let mut per_rule: BTreeMap<String, u32> = BTreeMap::new();
+                    for issue in &result.issues {
+                        if issue.status == tl_domain::QaIssueStatus::Open {
+                            *per_rule.entry(issue.rule_id.clone()).or_default() += 1;
+                        }
+                    }
+                    let rules: Vec<Value> = per_rule
+                        .into_iter()
+                        .map(|(rule, count)| serde_json::json!({ "rule": rule, "open": count }))
+                        .collect();
+                    (
+                        serde_json::json!({
+                            "checkedSegments": result.checked_segments,
+                            "openIssues": result.open_issues,
+                            "byRule": rules,
+                        })
+                        .to_string(),
+                        Some((
+                            HarnessStepKind::Qa,
+                            AgentStepStatus::Done,
+                            None,
+                            format!("qa_run：{} 个未解决问题", result.open_issues),
+                        )),
+                    )
+                }
+                Err(error) => (
+                    serde_json::json!({"error": error.to_string()}).to_string(),
+                    None,
+                ),
+            },
+            "note" => {
+                let Some(text) = str_arg("text") else {
+                    return (r#"{"error":"缺少 args.text"}"#.to_string(), None);
+                };
+                if view.notes.len() >= 200 {
+                    return (r#"{"error":"笔记数量已达上限"}"#.to_string(), None);
+                }
+                let clipped: String = text.chars().take(2_000).collect();
+                view.notes.push(clipped.clone());
+                (
+                    r#"{"ok":true}"#.to_string(),
+                    Some((
+                        HarnessStepKind::Note,
+                        AgentStepStatus::Done,
+                        None,
+                        clipped.chars().take(120).collect::<String>(),
+                    )),
+                )
+            }
+            other => (
+                serde_json::json!({
+                    "error": format!("未知工具 {other}；可用工具见系统提示")
+                })
+                .to_string(),
+                Some((
+                    HarnessStepKind::Tool,
+                    AgentStepStatus::Failed,
+                    None,
+                    format!("未知工具 {other}"),
+                )),
+            ),
+        }
+    }
+
+    /// `write_draft`: the same guards the batch agent applies — live row
+    /// still writable (exists, unlocked, not confirmed), placeholder
+    /// integrity is a hard gate, origin stamped `aiDraft`, segment-scoped
+    /// QA refreshed in the same transaction.
+    #[allow(clippy::type_complexity)]
+    fn harness_write_draft(
+        &mut self,
+        view: &mut HarnessRunView,
+        segment_id: &str,
+        target_text: &str,
+    ) -> (
+        String,
+        Option<(HarnessStepKind, AgentStepStatus, Option<String>, String)>,
+    ) {
+        let refusal = |message: String| {
+            (
+                serde_json::json!({ "error": message.clone() }).to_string(),
+                Some((
+                    HarnessStepKind::Draft,
+                    AgentStepStatus::Failed,
+                    Some(segment_id.to_string()),
+                    message,
+                )),
+            )
+        };
+        let segment = match self.store.segment(segment_id) {
+            Ok(Some(segment)) => segment,
+            Ok(None) => return refusal(format!("句段 {segment_id} 不存在")),
+            Err(error) => return refusal(error.to_string()),
+        };
+        if segment.locked {
+            return refusal("句段已锁定，保留人工状态".to_string());
+        }
+        if segment.state == SegmentState::Confirmed {
+            return refusal("句段已确认，不可覆盖".to_string());
+        }
+        let tag_check = tl_ai::check_tag_integrity(&segment.source_text, target_text);
+        if !tag_check.ok {
+            return (
+                serde_json::json!({
+                    "error": "译文破坏了占位符/标签，未写入",
+                    "missing": tag_check.missing,
+                    "extra": tag_check.extra,
+                })
+                .to_string(),
+                Some((
+                    HarnessStepKind::Draft,
+                    AgentStepStatus::Failed,
+                    Some(segment_id.to_string()),
+                    "占位符完整性检查未通过，草稿被拒绝".to_string(),
+                )),
+            );
+        }
+        let project = match self.require_project(&view.project_id) {
+            Ok(project) => project.clone(),
+            Err(error) => return refusal(error.to_string()),
+        };
+        let mut updated = segment;
+        updated.target_text = target_text.to_string();
+        updated.state = SegmentState::Draft;
+        updated.origin = Some(SegmentOrigin {
+            kind: SegmentOriginKind::AiDraft,
+            score: None,
+            model: Some(view.model.clone()),
+            edited: false,
+        });
+        updated.revision += 1;
+        updated.updated_at_ms = now_ms();
+        if let Err(error) = self.store.apply(&StateDelta {
+            segments: vec![updated.clone()],
+            ..Default::default()
+        }) {
+            return refusal(error.to_string());
+        }
+        if let Err(error) = self.refresh_segment_qa(&project, &updated) {
+            return refusal(format!("草稿已写入但 QA 刷新失败：{error}"));
+        }
+        view.drafted_segments += 1;
+        (
+            serde_json::json!({
+                "ok": true,
+                "segmentId": segment_id,
+                "state": "draft",
+            })
+            .to_string(),
+            Some((
+                HarnessStepKind::Draft,
+                AgentStepStatus::Done,
+                Some(segment_id.to_string()),
+                format!(
+                    "写入草稿：{}",
+                    target_text.chars().take(80).collect::<String>()
+                ),
+            )),
+        )
+    }
+
     fn ai_agent_status(&self, params: AgentStatusParams) -> Result<AgentRunView, EngineError> {
         self.agent_runs
             .get(&params.run_id)
@@ -2502,6 +3319,124 @@ impl Engine {
                 segment_id,
                 outcome,
             } => self.agent_drafted(run_id, segment_id, outcome, notify),
+            EngineEvent::HarnessTool {
+                harness_id,
+                tool,
+                args,
+            } => self.harness_tool(harness_id, tool, args, notify),
+            EngineEvent::HarnessTrace {
+                harness_id,
+                kind,
+                ok,
+                detail,
+            } => {
+                let Some(run) = self.harness_runs.get_mut(&harness_id) else {
+                    return Ok(());
+                };
+                if run.view.status != HarnessRunStatus::Running {
+                    return Ok(());
+                }
+                let step_kind = match kind {
+                    events::HarnessTraceKind::Model => HarnessStepKind::Model,
+                    events::HarnessTraceKind::Web => HarnessStepKind::Web,
+                };
+                if kind == events::HarnessTraceKind::Model {
+                    run.view.turns_used += 1;
+                }
+                let mut view = run.view.clone();
+                push_harness_step(
+                    &mut view,
+                    notify,
+                    step_kind,
+                    if ok {
+                        AgentStepStatus::Done
+                    } else {
+                        AgentStepStatus::Failed
+                    },
+                    None,
+                    detail,
+                );
+                if let Some(run) = self.harness_runs.get_mut(&harness_id) {
+                    run.view = view;
+                }
+                Ok(())
+            }
+            EngineEvent::HarnessFinished {
+                harness_id,
+                summary,
+                exhausted,
+            } => {
+                let Some(run) = self.harness_runs.get_mut(&harness_id) else {
+                    return Ok(());
+                };
+                if run.view.status != HarnessRunStatus::Running {
+                    return Ok(());
+                }
+                run.view.status = HarnessRunStatus::AwaitingReview;
+                run.view.summary = Some(summary.clone());
+                let mut view = run.view.clone();
+                push_harness_step(
+                    &mut view,
+                    notify,
+                    HarnessStepKind::Summary,
+                    if exhausted {
+                        AgentStepStatus::Skipped
+                    } else {
+                        AgentStepStatus::Done
+                    },
+                    None,
+                    summary,
+                );
+                if let Some(run) = self.harness_runs.get_mut(&harness_id) {
+                    run.view = view;
+                }
+                Ok(())
+            }
+            EngineEvent::HarnessFailed { harness_id, error } => {
+                let Some(run) = self.harness_runs.get_mut(&harness_id) else {
+                    return Ok(());
+                };
+                if run.view.status != HarnessRunStatus::Running {
+                    return Ok(());
+                }
+                run.view.status = HarnessRunStatus::Failed;
+                run.view.error_message = Some(error.clone());
+                let mut view = run.view.clone();
+                push_harness_step(
+                    &mut view,
+                    notify,
+                    HarnessStepKind::Summary,
+                    AgentStepStatus::Failed,
+                    None,
+                    format!("运行失败：{error}；已写入的草稿保留"),
+                );
+                if let Some(run) = self.harness_runs.get_mut(&harness_id) {
+                    run.view = view;
+                }
+                Ok(())
+            }
+            EngineEvent::HarnessCanceled { harness_id } => {
+                let Some(run) = self.harness_runs.get_mut(&harness_id) else {
+                    return Ok(());
+                };
+                if run.view.status != HarnessRunStatus::Running {
+                    return Ok(());
+                }
+                run.view.status = HarnessRunStatus::Canceled;
+                let mut view = run.view.clone();
+                push_harness_step(
+                    &mut view,
+                    notify,
+                    HarnessStepKind::Cancel,
+                    AgentStepStatus::Done,
+                    None,
+                    "运行已取消；已写入的草稿保留".to_string(),
+                );
+                if let Some(run) = self.harness_runs.get_mut(&harness_id) {
+                    run.view = view;
+                }
+                Ok(())
+            }
             EngineEvent::AgentFinished { run_id } => {
                 let Some(run) = self.agent_runs.get(&run_id) else {
                     return Ok(());
@@ -2748,6 +3683,35 @@ fn push_agent_step(
         method: notifications::AGENT_STEP.to_string(),
         params: serde_json::to_value(AgentStepNotification {
             run_id: view.run_id.clone(),
+            document_id: view.document_id.clone(),
+            run_status: view.status,
+            step,
+        })
+        .unwrap_or(Value::Null),
+    });
+}
+
+fn push_harness_step(
+    view: &mut HarnessRunView,
+    notify: &mut dyn FnMut(RpcNotification),
+    kind: HarnessStepKind,
+    status: AgentStepStatus,
+    segment_id: Option<String>,
+    detail: String,
+) {
+    let step = HarnessStep {
+        index: view.steps.len() as u32,
+        kind,
+        status,
+        segment_id,
+        detail,
+    };
+    view.steps.push(step.clone());
+    view.updated_at_ms = now_ms();
+    notify(RpcNotification {
+        method: notifications::HARNESS_STEP.to_string(),
+        params: serde_json::to_value(HarnessStepNotification {
+            harness_id: view.harness_id.clone(),
             document_id: view.document_id.clone(),
             run_status: view.status,
             step,

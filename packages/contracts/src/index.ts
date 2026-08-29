@@ -105,11 +105,15 @@ export const ENGINE_METHODS = [
   "ai.agent.status",
   "ai.agent.review",
   "ai.agent.cancel",
+  "ai.harness.start",
+  "ai.harness.status",
+  "ai.harness.cancel",
 ] as const satisfies readonly EngineMethod[];
 
 export const ENGINE_NOTIFICATIONS = [
   "notify.engine.ready",
   "notify.ai.agent.step",
+  "notify.ai.harness.step",
 ] as const satisfies readonly EngineNotificationName[];
 
 export function isEngineMethod(value: string): value is EngineMethod {

@@ -43,6 +43,72 @@ export interface EditorCaret {
   column: number;
 }
 
+/**
+ * One AutoSuggest candidate for the active segment's target editor. The
+ * grid only prefix-filters and displays — every candidate comes from data
+ * the engine already returned (TM matches, term hits) or verbatim source
+ * material (numbers); nothing is scored or invented here.
+ */
+export interface EditorSuggestion {
+  text: string;
+  kind: "tm" | "term" | "number";
+}
+
+const SUGGESTION_KIND_LABEL: Record<EditorSuggestion["kind"], string> = {
+  tm: "TM",
+  term: "术语",
+  number: "数字",
+};
+
+/** Cap the popup so it stays a glance, not a second document. */
+const SUGGESTION_LIMIT = 8;
+
+/**
+ * The word prefix immediately before the caret: the run of letters,
+ * digits, marks and number-punctuation the user is mid-typing. Returns
+ * null when the caret sits on a boundary (nothing typed yet).
+ */
+function suggestPrefixAt(
+  value: string,
+  caret: number,
+): { start: number; text: string } | null {
+  const before = value.slice(0, caret);
+  let start = before.length;
+  for (const match of before.matchAll(/[\p{L}\p{N}\p{M}][\p{L}\p{N}\p{M}.,:%-]*$/gu)) {
+    start = match.index;
+    break;
+  }
+  if (start >= before.length) {
+    return null;
+  }
+  return { start, text: before.slice(start) };
+}
+
+/** Case-insensitive prefix filter over the provided candidates. */
+function filterSuggestions(
+  candidates: readonly EditorSuggestion[],
+  prefix: string,
+): EditorSuggestion[] {
+  const lowered = prefix.toLowerCase();
+  const seen = new Set<string>();
+  const matches: EditorSuggestion[] = [];
+  for (const candidate of candidates) {
+    if (matches.length >= SUGGESTION_LIMIT) {
+      break;
+    }
+    const text = candidate.text;
+    if (
+      text.length > prefix.length &&
+      text.toLowerCase().startsWith(lowered) &&
+      !seen.has(text)
+    ) {
+      seen.add(text);
+      matches.push(candidate);
+    }
+  }
+  return matches;
+}
+
 export interface SegmentGridHandle {
   /**
    * Splice text into the mounted target editor at the caret (replacing any
@@ -137,6 +203,13 @@ export interface SegmentGridProps {
    * local facts only — never guessed from segment text.
    */
   onCaretChange?: (caret: EditorCaret | null) => void;
+  /**
+   * AutoSuggest candidates for the active segment (TM target texts, term
+   * targets, source numbers — composed by the workbench from engine
+   * results). The editor prefix-filters them while typing; ↑/↓ select,
+   * Enter/Tab accept, Esc dismisses.
+   */
+  suggestions?: readonly EditorSuggestion[];
   /** Debounce for the typing auto-save; tests may shorten it. */
   autoSaveDelayMs?: number;
   /** Imperative access to the target editor (dock term insertion). */
@@ -315,6 +388,7 @@ interface TargetEditorProps {
   onSaveDraft: SegmentGridProps["onSaveDraft"];
   onConfirm: SegmentGridProps["onConfirm"];
   onCaretChange?: ((caret: EditorCaret | null) => void) | undefined;
+  suggestions?: readonly EditorSuggestion[] | undefined;
   /** Escape pressed: the pending draft is already flushed; leave editing. */
   onExit: () => void;
   editorRef: RefObject<TargetEditorHandle | null>;
@@ -334,6 +408,7 @@ function TargetEditor({
   onSaveDraft,
   onConfirm,
   onCaretChange,
+  suggestions,
   onExit,
   editorRef,
 }: TargetEditorProps) {
@@ -341,6 +416,55 @@ function TargetEditor({
   // by an outside write to the committed target (effect below).
   const [draft, setDraft] = useState(() => segment.targetText);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // AutoSuggest: the word prefix being typed (null = popup closed). The
+  // caret is a DOM fact, so this is set from input events, never derived
+  // during render.
+  const [suggestAnchor, setSuggestAnchor] = useState<{
+    start: number;
+    text: string;
+  } | null>(null);
+  const [suggestIndex, setSuggestIndex] = useState(0);
+  const suggestMatches = useMemo(
+    () =>
+      suggestAnchor && suggestions && suggestions.length > 0
+        ? filterSuggestions(suggestions, suggestAnchor.text)
+        : [],
+    [suggestions, suggestAnchor],
+  );
+  const suggestOpen = suggestAnchor !== null && suggestMatches.length > 0;
+
+  const refreshSuggestAnchor = useCallback(
+    (textarea: HTMLTextAreaElement) => {
+      // A selection is never a prefix; only a collapsed caret suggests.
+      if (textarea.selectionStart !== textarea.selectionEnd) {
+        setSuggestAnchor(null);
+        return;
+      }
+      setSuggestAnchor(
+        suggestPrefixAt(textarea.value, textarea.selectionStart ?? 0),
+      );
+      setSuggestIndex(0);
+    },
+    [],
+  );
+
+  const acceptSuggestion = useCallback(
+    (textarea: HTMLTextAreaElement, suggestion: EditorSuggestion) => {
+      const anchor = suggestAnchor;
+      if (!anchor) {
+        return;
+      }
+      const caret = textarea.selectionStart ?? textarea.value.length;
+      const next =
+        textarea.value.slice(0, anchor.start) +
+        suggestion.text +
+        textarea.value.slice(caret);
+      pendingCaretRef.current = anchor.start + suggestion.text.length;
+      setDraft(next);
+      setSuggestAnchor(null);
+    },
+    [suggestAnchor],
+  );
   // Splicing into the value mid-IME-composition would corrupt the composed
   // input, so inserts requested while composing are queued and flushed on
   // compositionend.
@@ -418,6 +542,7 @@ function TargetEditor({
     composingRef.current = false;
     pendingInsertRef.current = "";
     pendingCaretRef.current = null;
+    setSuggestAnchor(null);
   }, [segment.targetText]);
 
   // Debounced auto-save: re-armed on every keystroke, quiet during IME
@@ -539,15 +664,32 @@ function TargetEditor({
         ref={textareaRef}
         value={draft}
         autoFocus
+        aria-autocomplete={suggestions ? "list" : undefined}
+        aria-expanded={suggestions ? suggestOpen : undefined}
         onChange={(event) => {
           setDraft(event.target.value);
           reportCaret();
+          if (!composingRef.current) {
+            refreshSuggestAnchor(event.target);
+          }
         }}
         // Fires on every caret move (keyboard or mouse), so
         // the status-bar readout tracks the real position.
-        onSelect={reportCaret}
+        onSelect={(event) => {
+          reportCaret();
+          // A caret that wandered off the typed prefix ends the popup;
+          // typing keeps the caret exactly at the prefix end.
+          const caret = event.currentTarget.selectionStart ?? 0;
+          setSuggestAnchor((anchor) =>
+            anchor && caret === anchor.start + anchor.text.length
+              ? anchor
+              : null,
+          );
+        }}
+        onBlur={() => setSuggestAnchor(null)}
         onCompositionStart={() => {
           composingRef.current = true;
+          setSuggestAnchor(null);
         }}
         onCompositionEnd={(event) => {
           composingRef.current = false;
@@ -559,6 +701,7 @@ function TargetEditor({
           // Text committed by the IME must reach the debounced draft save
           // even when no further input follows.
           setSaveTick((tick) => tick + 1);
+          refreshSuggestAnchor(event.currentTarget);
         }}
         onKeyDown={(event) => {
           if (event.nativeEvent.isComposing) {
@@ -566,6 +709,38 @@ function TargetEditor({
             // composed text, Esc cancels the composition — never the
             // segment.
             return;
+          }
+          const plain =
+            !event.ctrlKey && !event.metaKey && !event.altKey;
+          if (suggestOpen && plain) {
+            // The popup owns ↑/↓/Enter/Tab/Esc while it is open; the
+            // confirm chords keep Ctrl/Cmd so they are never shadowed.
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              event.preventDefault();
+              const delta = event.key === "ArrowDown" ? 1 : -1;
+              setSuggestIndex(
+                (index) =>
+                  (index + delta + suggestMatches.length) %
+                  suggestMatches.length,
+              );
+              return;
+            }
+            if (
+              (event.key === "Enter" && !event.shiftKey) ||
+              event.key === "Tab"
+            ) {
+              event.preventDefault();
+              const chosen = suggestMatches[suggestIndex];
+              if (chosen) {
+                acceptSuggestion(event.currentTarget, chosen);
+              }
+              return;
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setSuggestAnchor(null);
+              return;
+            }
           }
           const mode = confirmModeForKey(event);
           if (mode) {
@@ -584,6 +759,40 @@ function TargetEditor({
           }
         }}
       />
+      {suggestOpen ? (
+        <div className="segment-grid__suggest" role="listbox" aria-label="自动建议">
+          {suggestMatches.map((suggestion, index) => (
+            <button
+              type="button"
+              role="option"
+              aria-selected={index === suggestIndex}
+              data-selected={index === suggestIndex || undefined}
+              className="segment-grid__suggest-item"
+              key={`${suggestion.kind}:${suggestion.text}`}
+              // Keep focus in the textarea so the click can splice at the
+              // caret; the blur handler would otherwise close the popup
+              // before the click lands.
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                const textarea = textareaRef.current;
+                if (textarea) {
+                  acceptSuggestion(textarea, suggestion);
+                }
+              }}
+            >
+              <span
+                className="segment-grid__suggest-kind"
+                data-kind={suggestion.kind}
+              >
+                {SUGGESTION_KIND_LABEL[suggestion.kind]}
+              </span>
+              <span className="segment-grid__suggest-text">
+                {suggestion.text}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -605,6 +814,7 @@ export function SegmentGrid({
   onToggleLock,
   onUpdateSource,
   onCaretChange,
+  suggestions,
   autoSaveDelayMs = AUTO_SAVE_DELAY_MS,
   ref,
 }: SegmentGridProps) {
@@ -1018,6 +1228,7 @@ export function SegmentGrid({
                       onSaveDraft={onSaveDraft}
                       onConfirm={onConfirm}
                       onCaretChange={onCaretChange}
+                      suggestions={suggestions}
                       onExit={handleEditorExit}
                       editorRef={editorHandleRef}
                     />

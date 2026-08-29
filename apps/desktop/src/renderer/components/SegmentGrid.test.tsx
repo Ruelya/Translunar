@@ -193,6 +193,64 @@ describe("SegmentGrid", () => {
     expect(screen.queryByLabelText("句段 1 源文")).not.toBeInTheDocument();
   });
 
+  it("offers prefix-filtered AutoSuggest candidates and accepts with Enter", async () => {
+    const onSaveDraft = vi.fn();
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "Temperature range -20°C~150°C.")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={onSaveDraft}
+        onConfirm={vi.fn()}
+        suggestions={[
+          { text: "温度测量范围", kind: "tm" },
+          { text: "Temperature", kind: "term" },
+          { text: "150", kind: "number" },
+        ]}
+      />,
+    );
+    const editor = screen.getByLabelText("句段 1 译文");
+    await userEvent.type(editor, "Temp");
+    // Prefix "Temp" matches only the term candidate.
+    const option = screen.getByRole("option", { name: /Temperature/ });
+    expect(option).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /150/ })).not.toBeInTheDocument();
+    fireEvent.keyDown(editor, { key: "Enter" });
+    expect(editor).toHaveValue("Temperature");
+    // Accepting closed the popup.
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("cycles AutoSuggest with arrows and dismisses with Escape without leaving the editor", async () => {
+    render(
+      <SegmentGrid
+        segments={[segment("s1", 0, "240×240 display.")]}
+        activeSegmentId="s1"
+        qaSegmentIds={new Set()}
+        onSelect={vi.fn()}
+        onSaveDraft={vi.fn()}
+        onConfirm={vi.fn()}
+        suggestions={[
+          { text: "240×240", kind: "tm" },
+          { text: "240", kind: "number" },
+        ]}
+      />,
+    );
+    const editor = screen.getByLabelText("句段 1 译文");
+    await userEvent.type(editor, "24");
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    fireEvent.keyDown(editor, { key: "ArrowDown" });
+    fireEvent.keyDown(editor, { key: "Enter" });
+    expect(editor).toHaveValue("240");
+    // Type again, then Escape: the popup closes but editing continues.
+    await userEvent.type(editor, " 24");
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    fireEvent.keyDown(editor, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("句段 1 译文")).toBeInTheDocument();
+  });
+
   it("renders no per-row save/confirm buttons in the active row", () => {
     render(
       <SegmentGrid

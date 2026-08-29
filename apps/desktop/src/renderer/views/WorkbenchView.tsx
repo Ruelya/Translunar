@@ -32,6 +32,7 @@ import type {
   Segment,
   SegmentCounts,
   SegmentOrigin,
+  TermMatch,
   TmMatchItem,
 } from "@translunar/contracts";
 import {
@@ -85,6 +86,7 @@ import { SegmentGrid } from "../components/SegmentGrid.js";
 import type {
   ConfirmMode,
   EditorCaret,
+  EditorSuggestion,
   SegmentGridHandle,
 } from "../components/SegmentGrid.js";
 import { TmPanel } from "../components/TmPanel.js";
@@ -487,6 +489,60 @@ export function WorkbenchView({
       cancelled = true;
     };
   }, [project.id, activeSegment]);
+
+  // Term hits for the active segment, fetched alongside the TM lookup so
+  // AutoSuggest works regardless of which dock tab is open. Same honesty
+  // rule: engine results only, silently empty on failure (the term dock
+  // reports its own errors when it is open).
+  const [activeTermMatches, setActiveTermMatches] = useState<TermMatch[]>([]);
+  useEffect(() => {
+    setActiveTermMatches([]);
+    if (!activeSegment) {
+      return;
+    }
+    let cancelled = false;
+    callEngine("term.lookup", {
+      projectId: project.id,
+      sourceText: activeSegment.sourceText,
+    })
+      .then((result) => {
+        if (!cancelled) {
+          setActiveTermMatches(result.matches);
+        }
+      })
+      .catch(() => {
+        // AutoSuggest simply offers no term candidates.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id, activeSegment]);
+
+  // AutoSuggest candidates for the active segment: TM target texts, term
+  // targets for the project's target locale, and numbers lifted verbatim
+  // from the source. Composition only — the engine scored the TM matches
+  // and found the term spans; nothing is judged here.
+  const editorSuggestions = useMemo(() => {
+    const candidates: EditorSuggestion[] = [];
+    for (const match of tmMatches) {
+      candidates.push({ text: match.entry.targetText, kind: "tm" });
+    }
+    for (const match of activeTermMatches) {
+      for (const translation of match.translations) {
+        if (translation.locale === project.targetLocale && !translation.forbidden) {
+          candidates.push({ text: translation.term, kind: "term" });
+        }
+      }
+    }
+    if (activeSegment) {
+      for (const token of activeSegment.sourceText.matchAll(
+        /\d+(?:[.,:]\d+)*%?/g,
+      )) {
+        candidates.push({ text: token[0], kind: "number" });
+      }
+    }
+    return candidates;
+  }, [tmMatches, activeTermMatches, activeSegment, project.targetLocale]);
 
   // The stored QA export gate, fetched once per project. A failed fetch
   // leaves the menu checkbox off — the toggle refetches before writing, so
@@ -3363,6 +3419,7 @@ export function WorkbenchView({
                     void updateSourceText(segment, text)
                   }
                   onCaretChange={setCaret}
+                  suggestions={editorSuggestions}
                 />
               )}
               <PreviewPane

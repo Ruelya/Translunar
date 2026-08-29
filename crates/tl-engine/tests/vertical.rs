@@ -15,9 +15,10 @@ use tl_engine::{Engine, EngineEvent};
 use tl_protocol::{
     AgentRunStatus, AgentRunView, AgentStartParams, AgentStepKind, AiAssistAction, AiAssistParams,
     AiAssistRunStatus, AiAssistRunView, AiProviderKind, AiStatusResult, DocumentExportResult,
-    DocumentImportResult, DocumentRemoveResult, InitializeResult, PROTOCOL_VERSION, QaRunResult,
-    RpcErrorCode, RpcNotification, RpcRequest, SegmentConfirmResult, SegmentListResult,
-    SegmentUpdateResult, SegmentUpdateSourceResult, TmLookupResult, methods,
+    DocumentImportResult, DocumentRemoveResult, HarnessRunStatus, HarnessRunView, HarnessStepKind,
+    InitializeResult, PROTOCOL_VERSION, QaRunResult, RpcErrorCode, RpcNotification, RpcRequest,
+    SegmentConfirmResult, SegmentListResult, SegmentUpdateResult, SegmentUpdateSourceResult,
+    TmLookupResult, methods,
 };
 
 fn fixture_docx() -> PathBuf {
@@ -79,6 +80,52 @@ fn spawn_sse_server(reply: &'static str, delay: Duration) -> String {
                 let mut body = vec![0u8; content_length];
                 let _ = reader.read_exact(&mut body);
                 thread::sleep(delay);
+                let payload = json!({"choices": [{"delta": {"content": reply}}]});
+                let body = format!("data: {payload}\n\ndata: [DONE]\n\n");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+    format!("http://{address}")
+}
+
+/// Loopback endpoint that walks a scripted list of replies: request N gets
+/// reply N (the last reply repeats if the model asks again). Powers the
+/// harness tool-loop test, where each turn must see a different tool call.
+fn spawn_sequenced_sse_server(replies: Vec<&'static str>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind sequenced fixture");
+    let address = listener.local_addr().expect("fixture address");
+    let cursor = Arc::new(Mutex::new(0usize));
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let cursor = Arc::clone(&cursor);
+            let replies = replies.clone();
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone fixture stream"));
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_err() || line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                let _ = reader.read_exact(&mut body);
+                let reply = {
+                    let mut cursor = cursor.lock().expect("fixture cursor");
+                    let index = (*cursor).min(replies.len() - 1);
+                    *cursor += 1;
+                    replies[index]
+                };
                 let payload = json!({"choices": [{"delta": {"content": reply}}]});
                 let body = format!("data: {payload}\n\ndata: [DONE]\n\n");
                 let response = format!(
@@ -190,6 +237,35 @@ fn drive_agent_run(
             return view;
         }
         assert!(Instant::now() < deadline, "agent run timed out");
+        match events.recv_timeout(Duration::from_millis(250)) {
+            Ok(event) => engine
+                .handle_engine_event(event, &mut |notification| notifications.push(notification))
+                .expect("engine event applies"),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => panic!("engine event channel closed"),
+        }
+    }
+}
+
+/// Pump worker events through the engine until the harness run leaves
+/// `running`, mirroring what the stdio loop does in production.
+fn drive_harness_run(
+    engine: &mut Engine,
+    events: &Receiver<EngineEvent>,
+    harness_id: &str,
+    notifications: &mut Vec<RpcNotification>,
+) -> HarnessRunView {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let view: HarnessRunView = call(
+            engine,
+            methods::AI_HARNESS_STATUS,
+            json!({ "harnessId": harness_id }),
+        );
+        if view.status != HarnessRunStatus::Running {
+            return view;
+        }
+        assert!(Instant::now() < deadline, "harness run timed out");
         match events.recv_timeout(Duration::from_millis(250)) {
             Ok(event) => engine
                 .handle_engine_event(event, &mut |notification| notifications.push(notification))
@@ -509,6 +585,111 @@ fn segment_source_editing_guards_and_honest_demotion() {
             }),
         ),
         RpcErrorCode::Conflict
+    );
+}
+
+#[test]
+fn harness_tool_loop_drives_a_whole_document_run() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let mut engine = Engine::open(&workspace.path().join("data")).expect("open engine");
+    let events = engine.take_engine_events();
+    let project: tl_domain::Project = call(
+        &mut engine,
+        methods::PROJECT_CREATE,
+        json!({"name": "Harness", "sourceLocale": "en-US", "targetLocale": "zh-CN"}),
+    );
+    let source = write_txt(
+        workspace.path(),
+        "harness.txt",
+        "Hello {count} world.\n\nSecond sentence here.\n",
+    );
+    let imported: DocumentImportResult = call(
+        &mut engine,
+        methods::DOCUMENT_IMPORT,
+        json!({"projectId": project.id, "sourcePath": source.display().to_string()}),
+    );
+    let document_id = imported.document.id.clone();
+
+    // Honest degradation: no provider, no run.
+    assert_eq!(
+        call_err(
+            &mut engine,
+            methods::AI_HARNESS_START,
+            json!({ "documentId": document_id }),
+        ),
+        RpcErrorCode::AiNotConfigured
+    );
+
+    // The scripted conversation: survey → a tag-breaking draft the engine
+    // must refuse → the corrected draft → a note → finish (fenced JSON).
+    let base_url = spawn_sequenced_sse_server(vec![
+        r#"{"tool":"read_segments","args":{"offset":0,"limit":10}}"#,
+        r#"{"tool":"write_draft","args":{"ordinal":1,"targetText":"你好，世界。"}}"#,
+        r#"{"tool":"write_draft","args":{"ordinal":1,"targetText":"你好 {count} 世界。"}}"#,
+        r#"{"tool":"note","args":{"text":"第 1 段含占位符 {count}，已保留。"}}"#,
+        "```json\n{\"tool\":\"finish\",\"args\":{\"summary\":\"完成 1 段草稿，第 2 段留待人工。\"}}\n```",
+    ]);
+    configure_loopback_ai(&mut engine, &base_url);
+
+    let started: HarnessRunView = call(
+        &mut engine,
+        methods::AI_HARNESS_START,
+        json!({ "documentId": document_id, "instruction": "翻译全文", "maxTurns": 10 }),
+    );
+    assert_eq!(started.status, HarnessRunStatus::Running);
+    assert_eq!(started.max_turns, 10);
+
+    let mut notifications = Vec::new();
+    let view = drive_harness_run(
+        &mut engine,
+        &events,
+        &started.harness_id,
+        &mut notifications,
+    );
+
+    // Terminal at the human review gate, with the model's own summary.
+    assert_eq!(view.status, HarnessRunStatus::AwaitingReview);
+    assert!(
+        view.summary
+            .as_deref()
+            .unwrap_or("")
+            .contains("完成 1 段草稿")
+    );
+    assert_eq!(view.drafted_segments, 1);
+    assert_eq!(view.notes.len(), 1);
+    assert_eq!(view.turns_used, 5);
+
+    // The tag-breaking draft was refused; the corrected one landed as an
+    // aiDraft-stamped draft. The engine never confirmed anything.
+    let refused = view.steps.iter().any(|step| {
+        step.kind == HarnessStepKind::Draft
+            && step.status == tl_protocol::AgentStepStatus::Failed
+            && step.detail.contains("占位符")
+    });
+    assert!(refused, "tag-integrity refusal is an observable step");
+    let listed: SegmentListResult = call(
+        &mut engine,
+        methods::SEGMENT_LIST,
+        json!({"documentId": document_id}),
+    );
+    let first = &listed.segments[0];
+    assert_eq!(first.target_text, "你好 {count} 世界。");
+    assert_eq!(first.state, tl_domain::SegmentState::Draft);
+    assert_eq!(
+        first.origin.as_ref().map(|origin| origin.kind),
+        Some(tl_domain::SegmentOriginKind::AiDraft)
+    );
+    assert_eq!(
+        listed.segments[1].state,
+        tl_domain::SegmentState::Untranslated
+    );
+
+    // Steps streamed over the reserved harness notification.
+    assert!(
+        notifications
+            .iter()
+            .any(|notification| notification.method == "notify.ai.harness.step"),
+        "harness steps stream as notifications"
     );
 }
 

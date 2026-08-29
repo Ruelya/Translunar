@@ -52,6 +52,13 @@ export type AiAssistAction = "translate" | "refine";
  * writes to the segment: a `done` run only carries a proposal for a human.
  */
 export type AiAssistRunStatus = "running" | "done" | "failed" | "canceled";
+/**
+ * Lifecycle of one harness run. Like the batch agent, the run never
+ * confirms and never exports: every terminal state leaves drafts (if any)
+ * parked at the human review gate.
+ */
+export type HarnessRunStatus = ("running" | "failed" | "canceled") | "awaitingReview";
+export type HarnessStepKind = ("summary" | "cancel") | "model" | "tool" | "draft" | "note" | "qa" | "web";
 export type DegradationSeverity = "warning" | "error";
 export type DocumentStatus = "active" | "failed" | "superseded";
 export type QaSeverity = "error" | "warning" | "info";
@@ -121,6 +128,9 @@ export interface RpcMethodCatalog {
   "ai.assist.start": MethodContract56;
   "ai.assist.status": MethodContract57;
   "ai.configure": MethodContract51;
+  "ai.harness.cancel": MethodContract65;
+  "ai.harness.start": MethodContract63;
+  "ai.harness.status": MethodContract64;
   "ai.profile.add": MethodContract53;
   "ai.profile.list": MethodContract54;
   "ai.profile.remove": MethodContract55;
@@ -466,6 +476,107 @@ export interface AiStatusResult {
   model?: string | null;
   profileCount?: number;
   provider?: AiProviderKind | null;
+  [k: string]: unknown;
+}
+/**
+ * A `{ params, result }` pair for one method. Only used for schema export.
+ */
+export interface MethodContract65 {
+  params: HarnessCancelParams;
+  result: HarnessRunView;
+}
+export interface HarnessCancelParams {
+  harnessId: string;
+  [k: string]: unknown;
+}
+/**
+ * The observable state of one harness run.
+ */
+export interface HarnessRunView {
+  cancelRequested: boolean;
+  createdAtMs: number;
+  documentId: string;
+  /**
+   * Drafts written through `write_draft` (guards passed).
+   */
+  draftedSegments: number;
+  /**
+   * Present exactly when `status` is `failed`.
+   */
+  errorMessage?: string | null;
+  harnessId: string;
+  instruction: string;
+  maxTurns: number;
+  model: string;
+  /**
+   * The model's own scratchpad, in order. Never pruned by the budget.
+   */
+  notes: string[];
+  profileId: string;
+  projectId: string;
+  provider: AiProviderKind;
+  status: HarnessRunStatus;
+  steps: HarnessStep[];
+  /**
+   * Present when terminal via `finish` (or the turn budget note).
+   */
+  summary?: string | null;
+  /**
+   * Term entries written through `term_add`.
+   */
+  termsAdded: number;
+  turnsUsed: number;
+  updatedAtMs: number;
+  webAccess: boolean;
+  [k: string]: unknown;
+}
+export interface HarnessStep {
+  detail: string;
+  index: number;
+  kind: HarnessStepKind;
+  segmentId?: string | null;
+  status: AgentStepStatus;
+  [k: string]: unknown;
+}
+/**
+ * A `{ params, result }` pair for one method. Only used for schema export.
+ */
+export interface MethodContract63 {
+  params: HarnessStartParams;
+  result: HarnessRunView;
+}
+export interface HarnessStartParams {
+  documentId: string;
+  /**
+   * The task brief. Optional: the default brief is "translate this
+   * document" with the project's language pair.
+   */
+  instruction?: string | null;
+  /**
+   * Model/tool turns before the honest circuit breaker trips.
+   * Default 24, cap 64.
+   */
+  maxTurns?: number | null;
+  /**
+   * Profile to drive the conversation; the default profile when omitted.
+   */
+  profileId?: string | null;
+  /**
+   * Enables the `web_fetch` tool for this run. Off by default: network
+   * reach is an explicit human decision, never an ambient capability.
+   */
+  webAccess?: boolean;
+  [k: string]: unknown;
+}
+/**
+ * A `{ params, result }` pair for one method. Only used for schema export.
+ */
+export interface MethodContract64 {
+  params: HarnessStatusParams;
+  result: HarnessRunView;
+}
+export interface HarnessStatusParams {
+  harnessId: string;
   [k: string]: unknown;
 }
 /**
@@ -2458,6 +2569,7 @@ export interface RpcNotification {
  */
 export interface NotificationCatalog {
   "notify.ai.agent.step": AgentStepNotification;
+  "notify.ai.harness.step": HarnessStepNotification;
   "notify.engine.ready": EngineReadyNotification;
 }
 /**
@@ -2470,6 +2582,16 @@ export interface AgentStepNotification {
   runId: string;
   runStatus: AgentRunStatus;
   step: AgentStep;
+  [k: string]: unknown;
+}
+/**
+ * Payload for the reserved `notify.ai.harness.step` frame.
+ */
+export interface HarnessStepNotification {
+  documentId: string;
+  harnessId: string;
+  runStatus: HarnessRunStatus;
+  step: HarnessStep;
   [k: string]: unknown;
 }
 /**

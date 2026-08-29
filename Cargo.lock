@@ -1763,6 +1763,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tl-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tl-protocol",
+]
+
+[[package]]
 name = "tl-domain"
 version = "0.1.0"
 dependencies = [
@@ -1796,6 +1808,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

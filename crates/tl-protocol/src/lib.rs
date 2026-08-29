@@ -93,11 +93,15 @@ pub mod methods {
     pub const AI_AGENT_STATUS: &str = "ai.agent.status";
     pub const AI_AGENT_REVIEW: &str = "ai.agent.review";
     pub const AI_AGENT_CANCEL: &str = "ai.agent.cancel";
+    pub const AI_HARNESS_START: &str = "ai.harness.start";
+    pub const AI_HARNESS_STATUS: &str = "ai.harness.status";
+    pub const AI_HARNESS_CANCEL: &str = "ai.harness.cancel";
 }
 
 pub mod notifications {
     pub const ENGINE_READY: &str = "notify.engine.ready";
     pub const AGENT_STEP: &str = "notify.ai.agent.step";
+    pub const HARNESS_STEP: &str = "notify.ai.harness.step";
 }
 
 /// A `{ params, result }` pair for one method. Only used for schema export.
@@ -237,6 +241,12 @@ pub struct RpcMethodCatalog {
     pub ai_agent_review: MethodContract<AgentReviewParams, AgentRunView>,
     #[serde(rename = "ai.agent.cancel")]
     pub ai_agent_cancel: MethodContract<AgentCancelParams, AgentRunView>,
+    #[serde(rename = "ai.harness.start")]
+    pub ai_harness_start: MethodContract<HarnessStartParams, HarnessRunView>,
+    #[serde(rename = "ai.harness.status")]
+    pub ai_harness_status: MethodContract<HarnessStatusParams, HarnessRunView>,
+    #[serde(rename = "ai.harness.cancel")]
+    pub ai_harness_cancel: MethodContract<HarnessCancelParams, HarnessRunView>,
 }
 
 /// Notification-name-keyed catalog for the reserved notification frames.
@@ -247,6 +257,8 @@ pub struct NotificationCatalog {
     pub engine_ready: EngineReadyNotification,
     #[serde(rename = "notify.ai.agent.step")]
     pub agent_step: AgentStepNotification,
+    #[serde(rename = "notify.ai.harness.step")]
+    pub harness_step: HarnessStepNotification,
 }
 
 /// Root schema exported for the TypeScript contracts package.
@@ -338,6 +350,9 @@ mod tests {
             methods::AI_AGENT_STATUS,
             methods::AI_AGENT_REVIEW,
             methods::AI_AGENT_CANCEL,
+            methods::AI_HARNESS_START,
+            methods::AI_HARNESS_STATUS,
+            methods::AI_HARNESS_CANCEL,
         ];
         assert_eq!(properties.len(), expected.len());
         for method in expected {
@@ -355,5 +370,6 @@ mod tests {
         let properties = value["properties"].as_object().expect("properties");
         assert!(properties.contains_key(notifications::ENGINE_READY));
         assert!(properties.contains_key(notifications::AGENT_STEP));
+        assert!(properties.contains_key(notifications::HARNESS_STEP));
     }
 }

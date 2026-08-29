@@ -9,6 +9,7 @@ import type {
 } from "../shared/desktop-api.js";
 import { AboutDialog } from "./components/AboutDialog.js";
 import { EngineGate } from "./components/EngineGate.js";
+import { AiStatusProvider } from "./lib/ai-status.js";
 import { ProjectSettingsDialog } from "./components/ProjectSettingsDialog.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
 import type { SettingsSection } from "./components/SettingsDialog.js";
@@ -400,17 +401,22 @@ export function App() {
         </span>
       </footer>
 
-      <SettingsDialog
-        open={appSettings.open}
-        section={appSettings.section}
-        onSectionChange={(section) =>
-          setAppSettings((current) => ({ ...current, section }))
-        }
-        onClose={() =>
-          setAppSettings((current) => ({ ...current, open: false }))
-        }
-        onStatusMessage={handleStatusMessage}
-      />
+      {/* The settings center hosts AI provider config; its own provider
+          instance syncs with the workbench dock over the ai-status change
+          bus. */}
+      <AiStatusProvider>
+        <SettingsDialog
+          open={appSettings.open}
+          section={appSettings.section}
+          onSectionChange={(section) =>
+            setAppSettings((current) => ({ ...current, section }))
+          }
+          onClose={() =>
+            setAppSettings((current) => ({ ...current, open: false }))
+          }
+          onStatusMessage={handleStatusMessage}
+        />
+      </AiStatusProvider>
 
       <ShortcutsDialog
         open={helpDialog === "keys"}

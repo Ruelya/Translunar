@@ -252,13 +252,15 @@ test("vertical slice through the workbench", async () => {
   ).toContainText("未解决");
 
   // The AI dock stacks 辅助 and Agent. Assist degrades honestly without
-  // credentials: the badge reads 未配置 and only the provider config form
-  // is offered.
+  // credentials: the badge reads 未配置 and the panel routes to the
+  // settings center instead of hosting a config form of its own.
   await page.getByRole("button", { name: "AI", exact: true }).click();
   await expect(
     page.locator(".tl-panel__header .tl-badge").first(),
   ).toContainText("未配置");
-  await expect(page.getByLabel("API Key")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "打开 AI 设置" }),
+  ).toBeVisible();
   await shot("05-ai-honest-unconfigured.png");
 
   // The agent (below in the same dock) cannot start without a provider:

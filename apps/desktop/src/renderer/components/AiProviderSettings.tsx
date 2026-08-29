@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from "react";
 import type { AiProviderKind } from "@translunar/contracts";
 import { Badge, Button, SelectField, TextField } from "@translunar/ui";
 
-import { useAiStatus } from "../lib/ai-status.js";
+import { notifyAiStatusChanged, useAiStatus } from "../lib/ai-status.js";
 import { callEngine, describeError } from "../lib/engine.js";
 
 /**
@@ -150,6 +150,8 @@ export function AiProviderSettings({
       setLabel("");
       setBaseUrl("");
       await refresh();
+      // The workbench dock mounts its own provider instance; tell it.
+      notifyAiStatusChanged();
       setSavedNote(`已验证并保存：${provider} / ${model}`);
       onStatusMessage(`模型已添加：${provider} / ${model}`);
     } catch (addError) {
@@ -175,6 +177,7 @@ export function AiProviderSettings({
         const list = await callEngine("ai.profile.remove", { profileId });
         setProfiles(list);
         await refresh();
+        notifyAiStatusChanged();
         onStatusMessage("模型已移除");
       } catch (removeError) {
         setError(describeError(removeError));

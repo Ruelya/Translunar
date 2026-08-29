@@ -96,11 +96,16 @@ async function shot(name: string) {
 }
 
 async function addProfile(model: string, submitLabel: string) {
-  const dock = page.locator(".workbench__dock");
-  await dock.getByLabel("模型", { exact: true }).fill(model);
-  await dock.getByLabel("Base URL").fill(sseUrl);
-  await dock.getByLabel("API Key").fill("fixture-key");
-  await dock.getByRole("button", { name: submitLabel, exact: true }).click();
+  // Provider configuration lives in the application settings center (设置
+  // ▸ AI 供应商), not in the dock panel.
+  const settings = page.getByRole("dialog", { name: "设置" });
+  await settings.getByLabel("供应商").selectOption("openaiCompatible");
+  await settings.getByLabel("模型", { exact: true }).fill(model);
+  await settings.getByLabel("Base URL").fill(sseUrl);
+  await settings.getByLabel("API Key").fill("fixture-key");
+  await settings
+    .getByRole("button", { name: submitLabel, exact: true })
+    .click();
 }
 
 test("multi-candidate MT and approval tiers against the real engine", async () => {
@@ -119,17 +124,20 @@ test("multi-candidate MT and approval tiers against the real engine", async () =
   const rows = page.locator(".segment-grid tbody tr");
   await expect(rows).toHaveCount(3, { timeout: 30_000 });
 
-  // Two profiles through the AI dock. The selector for the provider stays
-  // on openaiCompatible so the loopback fixture answers both.
+  // Two profiles through the settings center: the unconfigured AI dock
+  // routes there, and the loopback fixture answers both models.
   await page.getByRole("button", { name: "AI", exact: true }).click();
   const dock = page.locator(".workbench__dock");
-  await dock.getByLabel("供应商").selectOption("openaiCompatible");
+  await dock.getByRole("button", { name: "打开 AI 设置" }).click();
+  const settings = page.getByRole("dialog", { name: "设置" });
+  await expect(settings).toBeVisible();
   await addProfile("model-a", "保存配置");
-  await expect(dock.getByTestId("ai-profiles")).toContainText("model-a");
-  await dock.getByRole("button", { name: "添加模型" }).click();
-  await dock.getByLabel("供应商").selectOption("openaiCompatible");
+  await expect(settings.getByTestId("ai-profiles")).toContainText("model-a");
   await addProfile("model-b", "添加模型");
-  await expect(dock.getByTestId("ai-profiles")).toContainText("model-b");
+  await expect(settings.getByTestId("ai-profiles")).toContainText("model-b");
+  // Close the dialog; the dock badge mirrors the live status.
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
   await expect(page.locator(".tl-panel__header .tl-badge").first()).toHaveText(
     "2 个模型",
   );

@@ -41,6 +41,21 @@ export interface AiAvailability {
 
 const AiStatusContext = createContext<AiAvailability | null>(null);
 
+/**
+ * Cross-provider change bus. The settings center and the workbench mount
+ * separate provider instances (different subtrees); a config change in one
+ * must reach the other, so writers call [`notifyAiStatusChanged`] and every
+ * mounted provider re-queries the engine — the engine stays the single
+ * source of truth.
+ */
+const changeListeners = new Set<() => void>();
+
+export function notifyAiStatusChanged(): void {
+  for (const listener of changeListeners) {
+    listener();
+  }
+}
+
 export function AiStatusProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AiStatusResult | null>(null);
   const [profileList, setProfileList] = useState<AiProfileListResult>({
@@ -69,6 +84,17 @@ export function AiStatusProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  // Stay in sync with sibling provider instances (see the change bus above).
+  useEffect(() => {
+    const listener = () => {
+      void refresh();
+    };
+    changeListeners.add(listener);
+    return () => {
+      changeListeners.delete(listener);
+    };
   }, [refresh]);
 
   const value = useMemo<AiAvailability>(
